@@ -1,6 +1,6 @@
 # STAGE 4 — Eyes + calibration: "hover over the named object"
 
-Re-read `CLAUDE.md`, especially the IK ladder and safety rules 2–4. Stage 3 passed review: 46/46 unit tests still green, the agent drove real tools live (gestures, improvise, go_home all logged `done`), and the persona lands. This stage gives ARM-ANI eyes and a pixel→robot map. **It stops at HOVER — no descent, no gripper, no grasp. That is stage 5.** Keeping the arm 10cm above the table all stage means vision can be wrong without breaking anything.
+Act as a distinguished engineer and Re-read `CLAUDE.md`, especially the IK ladder and safety rules 2–4. Stage 3 passed review: 46/46 unit tests still green, the agent drove real tools live (gestures, improvise, go_home all logged `done`), and the persona lands. This stage gives ARM-ANI eyes and a pixel→robot map. **It stops at HOVER — no descent, no gripper, no grasp. That is stage 5.** Keeping the arm 10cm above the table all stage means vision can be wrong without breaking anything.
 
 ## Pre-work (~10 min)
 

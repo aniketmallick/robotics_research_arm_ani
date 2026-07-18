@@ -1,6 +1,6 @@
 # STAGE 3 — Voice brain ⭐ MILESTONE: the talking, roasting, bowing robot
 
-Re-read `CLAUDE.md` (rule 8 now states the ratified improvise budget: ≤8 keyframes, ≤5s each, ≤15s total — your interpretation was approved, no change needed). Stage 2 passed review; all 46 unit tests were independently re-run and passed. This stage wires the personality on top of the proven motion layer.
+Act as a distinguished engineer and Re-read `CLAUDE.md` (rule 8 now states the ratified improvise budget: ≤8 keyframes, ≤5s each, ≤15s total — your interpretation was approved, no change needed). Stage 2 passed review; all 46 unit tests were independently re-run and passed. This stage wires the personality on top of the proven motion layer.
 
 ## Pre-work (~10 min)
 
