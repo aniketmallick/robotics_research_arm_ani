@@ -9,10 +9,9 @@ Two deliberate choices, both about not trusting unverified constants:
 * The wiggle is RELATIVE to the current pose. Commanding an absolute target
   would move the arm from wherever it is to that target, which is not a 5
   degree move.
-* "Slow home" at the end returns to the STARTING pose, which is known to be
-  safe because the arm was already there. config.HOME_POSE is still a
-  placeholder that has never been verified on hardware, so moving to it is
-  offered separately, behind its own confirmation.
+* The return leg goes to the STARTING pose, which is known safe because the arm
+  was just there. Nothing here drives to config.HOME_POSE — safety rule 4 bars
+  that until capture_home has verified it on hardware.
 
 Default joint is wrist_roll: it rotates the gripper in place and cannot drive
 the arm into the table.
@@ -75,13 +74,16 @@ def main() -> int:
     try:
         safety.clear_stop()
         safety.install_kill_switch()
-        home_pose = ", ".join(f"{k}={v:.0f}" for k, v in sorted(config.HOME_POSE.items()))
+        home_state = "available" if config.HOME_VERIFIED else "NOT offered (home is unverified)"
         print(
             "\nKill switch armed: Ctrl-C (ESC too, if Input Monitoring is granted).\n"
-            "  Per safety rule 7 the kill switch slow-homes the arm. HOME_POSE is still the\n"
-            f"  UNVERIFIED placeholder ({home_pose}), so if you trigger it the arm will move\n"
-            "  there, which may be further than this test's 5 degrees. Keep that path clear.\n"
-            "  A second Ctrl-C aborts immediately, leaving the arm where it is."
+            "  Safety rule 7: the first press FREEZES the arm — it stops commanding and holds\n"
+            "  position. Nothing moves until you choose:\n"
+            "    [s] return slowly to where this move started\n"
+            f"    [h] go to home — {home_state}\n"
+            "    [t] torque off (support the arm first, it will drop)\n"
+            "    [l] leave it exactly as-is\n"
+            "  A second Ctrl-C aborts hard, leaving the arm where it is."
         )
 
         start = arm.read_positions()
@@ -100,12 +102,12 @@ def main() -> int:
             print(f"  (warning: disconnect failed: {exc})", file=sys.stderr)
 
     if safety.stop_requested():
-        return skip("kill switch fired during the test; arm returned to start")
+        return skip("kill switch fired during the test; the arm was frozen and you chose what next")
 
     print(
-        "\nNOTE: on the normal path this test returns to the pose the arm started in and never\n"
-        "      drives to config.HOME_POSE, which is still an unverified placeholder. Only the\n"
-        "      kill-switch path homes, because safety rule 7 requires it."
+        "\nNOTE: this test returns to the pose the arm started in. Nothing here ever drives to\n"
+        "      config.HOME_POSE — the kill switch only offers it, and only once capture_home\n"
+        "      has verified it (safety rules 4 and 7)."
     )
     return ok(f"{args.joint} moved +/-{WIGGLE_DEGREES:.0f} degrees and returned to start")
 

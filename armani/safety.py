@@ -216,9 +216,10 @@ def install_kill_switch(on_stop: object = None) -> None:
     """Register Ctrl-C (and ESC when permitted) as a stop request.
 
     Ctrl-C only sets the stop flag; it does not kill the process mid-motion.
-    The motion loop notices the flag, stops commanding new targets and returns
-    the arm home under control. A second Ctrl-C raises KeyboardInterrupt so the
-    operator is never trapped.
+    The motion loop notices the flag, stops commanding new targets and FREEZES,
+    holding position while the operator chooses what happens next (safety rule
+    7 — nothing auto-drives anywhere). A second Ctrl-C raises KeyboardInterrupt
+    so the operator is never trapped, and leaves the arm exactly where it is.
 
     ``on_stop`` is accepted for symmetry with later stages and unused for now.
     """
@@ -229,7 +230,8 @@ def install_kill_switch(on_stop: object = None) -> None:
         if _stop_requested.is_set():
             raise KeyboardInterrupt("second Ctrl-C — aborting immediately")
         request_stop("Ctrl-C")
-        print("\n[kill switch] stopping and returning home. Ctrl-C again to abort hard.")
+        print("\n[kill switch] freezing — the arm will hold position and ask what to do.")
+        print("              Ctrl-C again to abort hard and leave it exactly where it is.")
 
     try:
         signal.signal(signal.SIGINT, _handle_sigint)

@@ -52,28 +52,59 @@ def build_prompt(description: str) -> str:
     return f"Choreograph this move: {description}"
 
 
+def _json_candidates(raw: str) -> list[str]:
+    """Substrings of a reply that might be the JSON plan, best guess first.
+
+    Models pad their output unpredictably: markdown fences (sometimes several,
+    sometimes with the prose fence longer than the JSON one), prose before and
+    after, and stray brackets in that prose. Rather than guess one span and fail,
+    collect every plausible span and let the caller try each.
+    """
+    text = raw.strip()
+    candidates: list[str] = []
+
+    # Each fenced block, in order, with an optional language tag stripped.
+    if "```" in text:
+        for index, block in enumerate(text.split("```")):
+            if index % 2 == 0:  # outside the fences
+                continue
+            head, newline, rest = block.partition("\n")
+            candidates.append(rest if newline and head.strip().isalpha() else block)
+
+    candidates.append(text)
+
+    # Every bracket-opening position paired with the last closing bracket. This
+    # is what rescues "Here is the plan [see below]: [{...}]", where the first
+    # bracket belongs to the prose.
+    last_close = max(text.rfind("]"), text.rfind("}"))
+    if last_close != -1:
+        for position, char in enumerate(text):
+            if char in "[{" and position < last_close:
+                candidates.append(text[position : last_close + 1])
+
+    return candidates
+
+
 def extract_json(raw: str) -> object:
     """Pull JSON out of a reply that may be fenced or padded with prose."""
-    text = raw.strip()
-    if "```" in text:
-        # Take the largest fenced block; strip an optional language tag.
-        blocks = text.split("```")
-        text = max((b for i, b in enumerate(blocks) if i % 2 == 1), key=len, default=text)
-        if "\n" in text:
-            head, _, rest = text.partition("\n")
-            if head.strip().isalpha():
-                text = rest
-    starts = [i for i in (text.find("["), text.find("{")) if i != -1]
-    if not starts:
-        raise ImproviseError(f"no JSON found in the reply: {raw[:200]!r}")
-    start = min(starts)
-    end = max(text.rfind("]"), text.rfind("}"))
-    if end <= start:
-        raise ImproviseError(f"truncated JSON in the reply: {raw[:200]!r}")
-    try:
-        return json.loads(text[start : end + 1])
-    except json.JSONDecodeError as exc:
-        raise ImproviseError(f"reply is not valid JSON: {exc}") from None
+    if not raw.strip():
+        raise ImproviseError("the model returned an empty reply")
+
+    last_error: Exception | None = None
+    for candidate in _json_candidates(raw):
+        stripped = candidate.strip()
+        if not stripped or stripped[0] not in "[{":
+            continue
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+        except RecursionError:
+            # Pathologically nested input. Not valid for us either way.
+            raise ImproviseError("reply is nested far too deeply to be a keyframe plan") from None
+
+    detail = f": {last_error}" if last_error else ""
+    raise ImproviseError(f"no valid JSON in the reply{detail}. Reply began: {raw[:160]!r}")
 
 
 def validate(payload: object) -> list[Keyframe]:
@@ -122,7 +153,14 @@ def validate(payload: object) -> list[Keyframe]:
                 )
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ImproviseError(f"{where}: {joint} must be a number, got {value!r}")
-            clean[joint] = float(value)
+            try:
+                # A JSON integer literal has unbounded precision in Python, and
+                # float() on a 400-digit one raises OverflowError — which would
+                # escape validate()'s ImproviseError contract, skip the retry
+                # loop and surface as a raw traceback.
+                clean[joint] = float(value)
+            except OverflowError:
+                raise ImproviseError(f"{where}: {joint} is far too large to be an angle") from None
 
         # Clamp AFTER validation: a plan that needed clamping is still usable,
         # it just gets pulled inside the policy envelope.
@@ -136,6 +174,12 @@ def validate(payload: object) -> list[Keyframe]:
             raise ImproviseError(f"{where}: {exc}") from None
         keyframes.append(Keyframe(pose=safe_pose, seconds=float(seconds)))
 
+    total = sum(frame.seconds for frame in keyframes)
+    if total > config.IMPROVISE_MAX_TOTAL_SECONDS:
+        raise ImproviseError(
+            f"the whole plan runs {total:.1f}s, over the {config.IMPROVISE_MAX_TOTAL_SECONDS:g}s "
+            "limit for one improvised move — use fewer or shorter keyframes"
+        )
     return keyframes
 
 
@@ -155,7 +199,7 @@ def request_plan(description: str) -> list[Keyframe]:
         try:
             response = client.messages.create(
                 model=config.ANTHROPIC_MODEL,
-                max_tokens=1024,
+                max_tokens=config.IMPROVISE_MAX_TOKENS,
                 system=SYSTEM_PROMPT,
                 messages=messages,
             )
@@ -163,6 +207,21 @@ def request_plan(description: str) -> list[Keyframe]:
             raise ImproviseError(f"Claude call failed: {type(exc).__name__}: {exc}") from None
 
         raw = "".join(block.text for block in response.content if block.type == "text")
+        if response.stop_reason == "max_tokens":
+            # Otherwise the model is told "not valid JSON" when the real problem
+            # is that we cut it off, and it retries with the same long answer.
+            last_error = ImproviseError(
+                f"reply hit the {config.IMPROVISE_MAX_TOKENS}-token limit and was truncated"
+            )
+            log.warning("attempt %d: %s", attempt + 1, last_error)
+            if attempt == config.IMPROVISE_MAX_RETRIES:
+                break
+            messages = [
+                *messages,
+                {"role": "user", "content": "That reply was cut off. Reply with JSON only, and be brief."},
+            ]
+            continue
+
         try:
             keyframes = validate(extract_json(raw))
             log_event(
@@ -178,10 +237,13 @@ def request_plan(description: str) -> list[Keyframe]:
             log_event("improvise_rejected", description=description, attempt=attempt, error=str(exc))
             if attempt == config.IMPROVISE_MAX_RETRIES:
                 break
+            correction = f"That was rejected: {exc}. Reply with corrected JSON only."
+            # An empty assistant turn is a 400 from the API, which would surface
+            # as a misleading "Claude call failed" on the retry.
             messages = [
                 *messages,
-                {"role": "assistant", "content": raw},
-                {"role": "user", "content": f"That was rejected: {exc}. Reply with corrected JSON only."},
+                *([{"role": "assistant", "content": raw}] if raw.strip() else []),
+                {"role": "user", "content": correction},
             ]
 
     raise ImproviseError(f"no valid plan after {config.IMPROVISE_MAX_RETRIES + 1} attempts: {last_error}")

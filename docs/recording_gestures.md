@@ -49,6 +49,7 @@ lerobot-record \
   --teleop.port="$ARMANI_LEADER_PORT" \
   --teleop.id=leader_arm \
   --dataset.repo_id=anikmall/armani_gestures \
+  --dataset.root="$HOME/.cache/huggingface/lerobot/anikmall/armani_gestures" \
   --dataset.single_task="expressive gesture" \
   --dataset.num_episodes=8 \
   --dataset.fps=30 \
@@ -59,7 +60,15 @@ lerobot-record \
   --display_data=false
 ```
 
-Notes on the choices, so you can change them safely:
+**`--dataset.root` is not optional here.** `lerobot-record` calls `stamp_repo_id()` at
+dataset creation, which silently appends `_YYYYMMDD_HHMMSS` to the repo id — so without an
+explicit root the data lands in `anikmall/armani_gestures_20260718_193045`, not
+`anikmall/armani_gestures`, and `smoke_07` would report the dataset as missing forever.
+(This is why your existing datasets are named `..._20260630_215212`.) Pinning the root
+puts the files exactly where `config.GESTURE_DATASET_ROOT` looks. If you forget, the code
+falls back to the newest timestamped sibling, but pin it anyway.
+
+Notes on the other choices, so you can change them safely:
 
 - **`--robot.use_degrees=true`** must match `config.USE_DEGREES`. Record in one
   unit and replay in another and every joint is wrong by a factor of ~2.7.

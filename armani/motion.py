@@ -86,6 +86,8 @@ class RealArm:
 
     def disconnect(self) -> None:
         self._robot.disconnect()  # type: ignore[attr-defined]
+        if not config.DISABLE_TORQUE_ON_DISCONNECT:
+            print("  (arm still holding position — power it down or use torque-off to release)")
 
     def disable_torque(self) -> None:
         """Go limp. The arm WILL drop — the caller must have warned the operator."""
@@ -226,6 +228,7 @@ def connect(
         id=resolved_id,
         use_degrees=config.USE_DEGREES,
         max_relative_target=config.MAX_RELATIVE_TARGET,
+        disable_torque_on_disconnect=config.DISABLE_TORQUE_ON_DISCONNECT,
     )
     robot = SO101Follower(robot_config)
 

@@ -74,6 +74,11 @@ def main() -> int:
 
     try:
         pose = _pose_by_hand(arm)
+    except KeyboardInterrupt:
+        # Not an Exception, so it would otherwise escape as a raw traceback.
+        # torque_disabled()'s finally has already re-enabled torque by now.
+        print("\nInterrupted — nothing saved. Torque is back on; support the arm.", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"capture failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
@@ -100,6 +105,16 @@ def _pose_by_hand(arm: motion.Arm) -> dict[str, float]:
     joints = list(config.JOINTS)
     print("SUPPORT THE ARM — torque is about to release and it will go limp.")
     input("Press ENTER when you are holding it... ")
+
+    # Drain anything already buffered on stdin. Without this, an extra newline
+    # typed at the prompt above is still queued, the watcher thread reads it
+    # instantly, and the pose is "captured" before the operator has posed it.
+    try:
+        import termios
+
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:  # not a tty, or not a termios platform
+        pass
 
     # torque_disabled() guarantees torque comes back on however this block exits.
     with arm.torque_disabled():

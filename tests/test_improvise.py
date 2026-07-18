@@ -29,6 +29,8 @@ def parse(raw: str):
         f"```json\n{GOOD}\n```",                       # fenced
         f"Sure! Here you go:\n{GOOD}\nHope that helps.",  # prose either side
         '{"keyframes": ' + GOOD + "}",                  # wrapped in an object
+        f"```\nA long explanation, longer than the plan itself\n```\n```json\n{GOOD}\n```",
+        f"Here is the plan [see below]: {GOOD}",        # stray bracket in the prose
     ],
 )
 def test_accepts_the_shapes_models_actually_emit(raw):
@@ -53,9 +55,14 @@ def test_accepts_the_shapes_models_actually_emit(raw):
         '{"pose":{"wrist_roll":1},"seconds":1}',           # bare object, not a list
         "I refuse to answer.",                             # no JSON at all
         '[{"pose": {"wrist_roll": 1}, "seconds":',         # truncated
+        "",                                                # empty reply
+        '[{"pose": {"wrist_roll": ' + "9" * 400 + '}, "seconds": 1}]',  # OverflowError in float()
+        "[" + ",".join(['{"pose":{"wrist_roll":1},"seconds":5}'] * 8) + "]",  # 40s total
     ],
 )
 def test_rejects_bad_plans(raw):
+    """Rejection must be ImproviseError specifically — anything else escapes the
+    retry loop in request_plan and the CLI handler as a raw traceback."""
     with pytest.raises(improvise.ImproviseError):
         parse(raw)
 

@@ -115,7 +115,13 @@ def load_gesture(name: str) -> Gesture:
     rows = dataset.hf_dataset.select_columns("action")["action"]
     frames = tuple({j: float(v) for j, v in zip(joints, row)} for row in rows)
 
-    gesture = Gesture(name=name, episode=episode, fps=int(dataset.fps), frames=frames)
+    fps = int(dataset.fps)
+    if fps <= 0:
+        # _stream divides by this; a malformed info.json would be a ZeroDivisionError
+        # mid-playback rather than a clear message at load time.
+        raise ValueError(f"gesture {name!r} reports fps={dataset.fps!r}; the dataset metadata is broken")
+
+    gesture = Gesture(name=name, episode=episode, fps=fps, frames=frames)
     _check_units(gesture)
     _check_playable(gesture)
     return gesture
@@ -153,6 +159,12 @@ def _check_playable(gesture: Gesture) -> None:
     larger jumps (a dropped frame, a bad take) would still "play", but the arm
     would silently lag behind and the gesture would come out distorted. Better
     to say so than to perform something nobody recorded.
+
+    Necessary but not sufficient: lerobot compares the goal against the arm's
+    PRESENT position, not against the previous frame. If the follower falls
+    behind — a stiff joint, a slow bus — the present-to-goal gap can exceed the
+    cap even when every frame-to-frame delta is small. That shows up as a
+    gesture that lags rather than one that lurches, which is the safer failure.
     """
     worst_joint, worst_delta = "", 0.0
     for before, after in zip(gesture.frames, gesture.frames[1:]):

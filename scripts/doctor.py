@@ -107,6 +107,13 @@ def run(check: Check, dry_run: bool) -> int:
             print("\n  second Ctrl-C — abandoning the child process without waiting.")
             raise
 
+    if check.use_pytest:
+        # pytest's codes are NOT our codes: 0 passed, 1 failed, 2 INTERRUPTED
+        # (which includes collection errors), 3 internal error, 4 usage, 5 no
+        # tests collected. Mapping 2 straight through would report a broken test
+        # module as SKIP — a green-looking run over tests that never executed.
+        return PASS if code == 0 else FAIL
+
     return code if code in STATUS else FAIL
 
 

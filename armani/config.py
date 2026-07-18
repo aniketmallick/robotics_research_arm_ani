@@ -70,6 +70,13 @@ SERIAL_PORT_GLOB = "/dev/tty.usbmodem*"
 # Pin the normalisation mode rather than inheriting a library default.
 USE_DEGREES = True
 
+# lerobot defaults this to True, which means EVERY disconnect() releases torque
+# and the arm drops from wherever it is — including immediately after
+# capture_home has carefully parked it. We hold instead: a script ending should
+# not move the arm. The operator releases it deliberately, via the kill switch's
+# [t] option or by powering the arm down.
+DISABLE_TORQUE_ON_DISCONNECT = False
+
 JOINTS: tuple[str, ...] = (
     "shoulder_pan",
     "shoulder_lift",
@@ -219,8 +226,10 @@ def _load_home() -> tuple[dict[str, float], bool]:
         return dict(_PLACEHOLDER_HOME), False
     try:
         payload = json.loads(HOME_POSE_PATH.read_text())
+        # AttributeError included: a "pose" that is a list or string has no
+        # .items(), and an unverified home must never be a crash at import time.
         pose = {str(j): float(v) for j, v in payload["pose"].items()}
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         print(f"WARNING: ignoring unreadable {HOME_POSE_PATH}: {exc}")
         return dict(_PLACEHOLDER_HOME), False
 
@@ -259,9 +268,35 @@ GESTURE_DATASET_REPO_ID = os.getenv("ARMANI_GESTURE_REPO_ID", "anikmall/armani_g
 _LEROBOT_HOME = Path(
     os.getenv("HF_LEROBOT_HOME", Path.home() / ".cache" / "huggingface" / "lerobot")
 )
-GESTURE_DATASET_ROOT = Path(
-    os.getenv("ARMANI_GESTURE_ROOT", _LEROBOT_HOME / GESTURE_DATASET_REPO_ID)
-)
+def _resolve_gesture_root() -> Path:
+    """Where the recorded dataset actually landed.
+
+    lerobot-record calls DatasetConfig.stamp_repo_id() at creation, which appends
+    _YYYYMMDD_HHMMSS to the repo id — so `--dataset.repo_id=x/armani_gestures`
+    really writes `x/armani_gestures_20260718_193045`. The runbook pins
+    --dataset.root to avoid that, but if the operator omits it we would otherwise
+    look in a directory that never gets created and SKIP forever with no clue why.
+    So: exact path if it exists, else the newest timestamped sibling.
+
+    Only `root` matters to LeRobotDataset; repo_id is just a label (verified).
+    """
+    explicit = os.getenv("ARMANI_GESTURE_ROOT")
+    if explicit:
+        return Path(explicit)
+
+    exact = _LEROBOT_HOME / GESTURE_DATASET_REPO_ID
+    if (exact / "meta" / "info.json").is_file():
+        return exact
+
+    stamped = sorted(
+        candidate
+        for candidate in exact.parent.glob(f"{exact.name}_*")
+        if (candidate / "meta" / "info.json").is_file()
+    )
+    return stamped[-1] if stamped else exact
+
+
+GESTURE_DATASET_ROOT = _resolve_gesture_root()
 
 GESTURES: dict[str, int] = {
     "bow": 0,
@@ -281,7 +316,13 @@ GESTURE_PREPOSITION_S = 2.0  # slow move onto the episode's first frame
 IMPROVISE_MAX_KEYFRAMES = 8
 IMPROVISE_MIN_SECONDS = 0.3
 IMPROVISE_MAX_SECONDS = 5.0
+# Per-keyframe limits alone allow 8 x 5 = 40s of LLM-authored motion, and
+# interp_move's speed stretch makes that a floor, not a ceiling. Cap the whole
+# plan as well. See QUESTIONS FOR REVIEWER: CLAUDE.md rule 8 says "max 5s per
+# move", which may have meant the whole move rather than each keyframe.
+IMPROVISE_MAX_TOTAL_SECONDS = 15.0
 IMPROVISE_MAX_RETRIES = 1
+IMPROVISE_MAX_TOKENS = 1024
 
 # --- Trust gate thresholds ----------------------------------------------
 CONF_APPROVAL = 0.60
