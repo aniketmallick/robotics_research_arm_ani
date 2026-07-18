@@ -11,11 +11,15 @@ Keys are never printed — only whether they are set, and the result of using th
 
 from __future__ import annotations
 
-import numpy as np
-from _bootstrap import banner, fail, ok, parse_args, skip
+# _bootstrap must be imported before any third-party module: it checks that this
+# is the right interpreter and says so clearly. Import it after numpy and the
+# operator gets a bare ModuleNotFoundError traceback instead.
+from _bootstrap import banner, fail, ok, parse_args, skip  # isort: skip
 
-from armani import config
-from armani.logutil import log_event
+import numpy as np  # noqa: E402
+
+from armani import config  # noqa: E402
+from armani.logutil import log_event  # noqa: E402
 
 GEMINI_PROMPT = "List the objects you see. Reply with a short comma-separated list."
 

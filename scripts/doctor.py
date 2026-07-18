@@ -22,6 +22,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 TESTS_DIR = REPO_ROOT / "tests"
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
+# Imported for its side effect: _bootstrap checks that this interpreter actually
+# has the project's dependencies and exits with a clear message if not. Doing it
+# here means doctor aborts up front instead of running six tests that all fail
+# with "No module named ...". One definition of "the right interpreter".
+import _bootstrap  # noqa: E402,F401
 
 PASS, FAIL, SKIP = 0, 1, 2
 STATUS = {PASS: "PASS", FAIL: "FAIL", SKIP: "SKIP"}

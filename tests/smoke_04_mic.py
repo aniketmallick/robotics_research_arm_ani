@@ -9,11 +9,15 @@ this checks the signal level and treats near-silence as a failure.
 
 from __future__ import annotations
 
-import numpy as np
-from _bootstrap import banner, fail, ok, parse_args, permission_hint, skip
+# _bootstrap must be imported before any third-party module: it checks that this
+# is the right interpreter and says so clearly. Import it after numpy and the
+# operator gets a bare ModuleNotFoundError traceback instead.
+from _bootstrap import banner, fail, ok, parse_args, permission_hint, skip  # isort: skip
 
-from armani import config
-from armani.logutil import log_event
+import numpy as np  # noqa: E402
+
+from armani import config  # noqa: E402
+from armani.logutil import log_event  # noqa: E402
 
 # Peak amplitude below this on a 2s take means nothing reached the ADC.
 SILENCE_PEAK = 1e-4

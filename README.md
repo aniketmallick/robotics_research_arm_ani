@@ -11,15 +11,33 @@ actually installed on this machine.
 
 ## Setup
 
-Use the existing conda env — do not create a new one and do not upgrade lerobot:
+**Activate the conda env first — every command below assumes it.** Do not create a new
+env and do not reinstall lerobot:
 
 ```bash
-conda activate lerobot     # or use the absolute interpreter path below
+conda activate lerobot
 ```
 
+Being in `(base)` is *not* enough: on this machine bare `python` resolves to
+`~/.platformio/penv/bin/python`, which has none of the dependencies. Check with:
+
+```bash
+python -c "import sys, lerobot; print(sys.executable)"
+# expect: /Users/Aniket.Mallick/miniforge3/envs/lerobot/bin/python
 ```
-/Users/Aniket.Mallick/miniforge3/envs/lerobot/bin/python
+
+Or skip activation and use the interpreter directly:
+
 ```
+/Users/Aniket.Mallick/miniforge3/envs/lerobot/bin/python scripts/doctor.py
+```
+
+lerobot is an **editable install**: the source lives in
+`~/Documents/Claude/Projects/Robotics/lerobot`, but it is importable from this env. That is
+expected — this project does not vendor or reinstall it.
+
+Every smoke test and `doctor.py` aborts immediately with the correct interpreter path if run
+under the wrong Python, rather than reporting six confusing import failures.
 
 Then create your `.env`:
 

@@ -13,6 +13,8 @@ Exit codes, which scripts/doctor.py reads:
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -23,6 +25,66 @@ if str(REPO_ROOT) not in sys.path:
 EXIT_PASS = 0
 EXIT_FAIL = 1
 EXIT_SKIP = 2
+
+# Modules that only exist in the blessed conda env. If these are missing we are
+# running under the wrong interpreter, which is by far the most likely cause and
+# produces six meaningless "No module named X" failures if left undiagnosed.
+_CORE_MODULES = ("lerobot", "numpy", "cv2")
+
+
+def find_project_interpreter() -> str | None:
+    """Locate the conda env that actually has the project's dependencies."""
+    candidates = []
+    conda_root = os.environ.get("CONDA_PREFIX_1") or os.environ.get("CONDA_PREFIX")
+    if conda_root:
+        candidates.append(Path(conda_root).parent / "lerobot" / "bin" / "python")
+        candidates.append(Path(conda_root) / "envs" / "lerobot" / "bin" / "python")
+    for base in ("miniforge3", "miniconda3", "anaconda3", "mambaforge"):
+        candidates.append(Path.home() / base / "envs" / "lerobot" / "bin" / "python")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def missing_core_modules() -> list[str]:
+    missing = []
+    for name in _CORE_MODULES:
+        try:
+            if importlib.util.find_spec(name) is None:
+                missing.append(name)
+        except (ImportError, ValueError):
+            missing.append(name)
+    return missing
+
+
+def wrong_interpreter_message(missing: list[str]) -> str:
+    interpreter = find_project_interpreter()
+    fix = (
+        f"  conda activate lerobot\n  python {{script}}\n\nor use it directly:\n  {interpreter} {{script}}"
+        if interpreter
+        else "  conda activate lerobot"
+    )
+    return (
+        f"\nWRONG PYTHON ENVIRONMENT.\n\n"
+        f"  running: {sys.executable}\n"
+        f"  missing: {', '.join(missing)}\n\n"
+        f"This project must run in the conda 'lerobot' env — the only one with lerobot\n"
+        f"and the Feetech servo SDK. See docs/env_report.md.\n\n"
+        f"{fix}\n"
+    )
+
+
+def require_project_env() -> None:
+    """Abort immediately, and legibly, if this is the wrong interpreter."""
+    missing = missing_core_modules()
+    if not missing:
+        return
+    # argv[0] as invoked, so the suggested command is copy-pasteable as-is.
+    script = sys.argv[0] or "scripts/doctor.py"
+    sys.stdout.flush()
+    print(wrong_interpreter_message(missing).replace("{script}", script), file=sys.stderr)
+    raise SystemExit(EXIT_FAIL)
 
 
 def parse_args(description: str) -> argparse.Namespace:
@@ -60,6 +122,15 @@ def skip(message: str) -> int:
     return EXIT_SKIP
 
 
+def _check_on_import() -> None:
+    """Every smoke test imports this module first, so one call here guards all six.
+
+    Deliberately a side effect at import time: the wrong-interpreter case must be
+    caught before a test prints a banner and reports a misleading FAIL.
+    """
+    require_project_env()
+
+
 def permission_hint(pane: str, why: str) -> None:
     """Tell the operator exactly which macOS toggle to flip."""
     sys.stdout.flush()
@@ -70,3 +141,6 @@ def permission_hint(pane: str, why: str) -> None:
         f"  Permissions are granted to the terminal app, not to Python.\n",
         file=sys.stderr,
     )
+
+
+_check_on_import()
