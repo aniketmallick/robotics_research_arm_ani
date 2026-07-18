@@ -124,11 +124,14 @@ async def _run(worker: agent.MotionWorker, *, text_mode: bool, motion_enabled: b
     session_cm = agent.build_session(worker, text_only=text_mode)
     async with await session_cm as session:
         # A short greeting so the operator sees/hears it is live before starting.
+        # send_message already asks the model to respond (the SDK's _send_user_input
+        # creates the response itself), so we do NOT also call request_response —
+        # that second create is what made ARM-ANI reply twice to every turn.
         await session.send_message(
             "Greet the operator in one short sentence. If this is a voice session, mention "
             "they hold the spacebar to talk."
         )
-        await agent.request_response(session)
+
 
         background = [
             asyncio.create_task(_pump_events(session, worker, text_mode=text_mode)),
@@ -343,8 +346,10 @@ async def _text_input(session) -> None:
         line = line.strip()
         if not line or line.lower() in ("quit", "exit"):
             return
+        # send_message triggers the response itself — do not also request_response,
+        # or the model answers twice (see _run's greeting note).
         await session.send_message(line)
-        await agent.request_response(session)
+
 
 
 # --- Printing ------------------------------------------------------------

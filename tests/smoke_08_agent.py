@@ -45,9 +45,11 @@ async def _text_round_trip() -> str:
     worker.start()
     try:
         async with await agent.build_session(worker, text_only=True) as session:
+            # send_message triggers the model's response on its own; a second
+            # request_response would make it answer twice.
             await session.send_message("Introduce yourself in one sentence.")
-            await agent.request_response(session)
             return await agent.collect_text_reply(session, timeout=30.0)
+
     finally:
         worker.shutdown()
 

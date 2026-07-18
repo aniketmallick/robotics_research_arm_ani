@@ -17,7 +17,7 @@ Demo = 3 acts: (1) banter + gestures + one improvised move, (2) clean pick with 
 5. Every hardware-touching feature has a `--dry-run` mode that prints what it *would* do.
 6. **Trust gates live in our Python code inside `pick()` — never in the LLM prompt.** The LLM cannot bypass a gate no matter what it decides; prompts are style, gates are law.
 7. Kill switch: first ESC / Ctrl-C → **freeze** — stop commanding new targets, hold position, then prompt the operator (return-to-start / home-if-verified / torque-off / leave). Never auto-drive anywhere from the kill switch: the operator is present (rule 1) and chooses. Second Ctrl-C → hard abort, arm left exactly where it is. Always registered when motors are connected.
-8. LLM-generated motion (improvise_move) is never trusted raw: strict JSON schema, validated, clamped, max 8 keyframes, max 5s per move.
+8. LLM-generated motion (improvise_move) is never trusted raw: strict JSON schema, validated, clamped, max 8 keyframes, each keyframe ≤5s, whole move ≤15s total (ratified after stage-2 review).
 
 ## Hardware & machine facts
 
