@@ -16,6 +16,7 @@ Action dicts use lerobot's feature keys: ``"<joint>.pos"`` e.g. ``"shoulder_pan.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -94,7 +95,9 @@ JOINT_LIMITS: dict[str, tuple[float, float]] = {
     "shoulder_lift": (-60.0, 60.0),
     "elbow_flex": (-60.0, 60.0),
     "wrist_flex": (-60.0, 60.0),
-    "wrist_roll": (-60.0, 60.0),
+    # Pure rotation: collision-free, and the calibrated range is +-180, so +-150
+    # still leaves margin. Reviewer ruling after the stage-1 review.
+    "wrist_roll": (-150.0, 150.0),
     "gripper": (0.0, 100.0),  # percent, not degrees
 }
 
@@ -136,12 +139,25 @@ def _shrink(limits: dict[str, tuple[float, float]], margin: float) -> dict[str, 
 #             reachable, and clipping it would move the arm somewhere it never was.
 #   physical  Hard backstop applied at the send boundary only. Protects the
 #             servos; nothing should ever reach it.
+#   backstop  The send boundary. PHYSICAL widened by the same tolerance the
+#             start-pose check allows, because those two must agree: a joint
+#             parked at its mechanical stop reads slightly PAST the calibrated
+#             range (shoulder_lift -111.69 vs -111.0), and the first steps of
+#             any move out of that pose are necessarily still past it. Clamping
+#             those to the exact physical limit would fight a legal recovery
+#             and log an error on every step of it.
 LIMIT_PROFILES: dict[str, dict[str, tuple[float, float]]] = {
     "policy": JOINT_LIMITS,
     "recorded": _shrink(PHYSICAL_LIMITS, RECORDED_MARGIN),
     "physical": PHYSICAL_LIMITS,
+    "backstop": _shrink(PHYSICAL_LIMITS, -PHYSICAL_TOLERANCE),
 }
 DEFAULT_PROFILE = "policy"
+
+# Joints closer than this to their entry value are treated as "did not move",
+# so error recovery does not drag untouched joints around (safety rule 4's
+# "zero-length move if nothing moved yet").
+MOVED_EPSILON = 0.5
 
 
 def _assert_limits_within_physical() -> None:
@@ -162,19 +178,31 @@ CONTROL_HZ = 25  # interpolation rate; CLAUDE.md requires 20-30 Hz
 MAX_JOINT_SPEED = 45.0  # deg/s for body joints, percent/s for the gripper
 HOME_DURATION_S = 3.0  # deliberately slow; used by home(slow=True)
 
-# Defence in depth: lerobot's own per-step cap (config.max_relative_target),
-# in the same units as the action. Derived from the interpolator's own per-step
-# budget rather than picked by hand, so it is guaranteed to sit just above what
-# interp_move can legitimately emit and to actually catch a runaway step. A
-# hand-picked constant here was 4x looser than MAX_JOINT_SPEED and so could
-# never have fired.
-MAX_RELATIVE_TARGET = 2.0 * MAX_JOINT_SPEED / CONTROL_HZ
+# Slow, controlled return to the pose a motion began at (safety rule 4).
+RECOVERY_DURATION_S = 3.0
 
-# PLACEHOLDER home pose. All-zero degrees is the middle of each joint's
-# calibrated travel because calibration used set_half_turn_homings(). This has
-# NOT been verified on hardware yet and must be refined by the operator in
-# stage 2 before it is trusted as a resting pose.
-HOME_POSE: dict[str, float] = {
+# lerobot's own per-send cap (config.max_relative_target), same units as the
+# action. It must be sized for the LOOSEST legitimate motion in the system,
+# which is gesture replay — not for interp_move.
+#
+# Measured on real teleop at 30 fps: frame-to-frame deltas reach 6.16 (gripper),
+# 4.04 (shoulder_lift), 3.08 (elbow_flex). A cap derived from MAX_JOINT_SPEED
+# (1.8 per step) would silently clip every one of those and distort the replay
+# while reporting success. So this is sized off recorded reality, with headroom.
+#
+# It is a gross-error backstop, NOT the speed policy: interp_move independently
+# holds interpolated motion to MAX_JOINT_SPEED / CONTROL_HZ = 1.8 per step.
+MAX_FRAME_DELTA = 8.0
+MAX_RELATIVE_TARGET = MAX_FRAME_DELTA
+
+# Home pose. The placeholder below (all-zero degrees, the middle of each joint's
+# calibrated travel) has never been verified on hardware, so HOME_VERIFIED stays
+# False until scripts/capture_home.py records a pose the operator physically set.
+# Safety rule 4 forbids auto-driving to an unverified home.
+DATA_DIR = REPO_ROOT / "armani" / "data"
+HOME_POSE_PATH = DATA_DIR / "home_pose.json"
+
+_PLACEHOLDER_HOME: dict[str, float] = {
     "shoulder_pan": 0.0,
     "shoulder_lift": 0.0,
     "elbow_flex": 0.0,
@@ -182,6 +210,28 @@ HOME_POSE: dict[str, float] = {
     "wrist_roll": 0.0,
     "gripper": 50.0,
 }
+
+
+def _load_home() -> tuple[dict[str, float], bool]:
+    """Return (pose, verified). A missing or malformed file is not fatal — it
+    just leaves home unverified, which blocks auto-homing rather than the app."""
+    if not HOME_POSE_PATH.is_file():
+        return dict(_PLACEHOLDER_HOME), False
+    try:
+        payload = json.loads(HOME_POSE_PATH.read_text())
+        pose = {str(j): float(v) for j, v in payload["pose"].items()}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"WARNING: ignoring unreadable {HOME_POSE_PATH}: {exc}")
+        return dict(_PLACEHOLDER_HOME), False
+
+    missing = [j for j in JOINTS if j not in pose]
+    if missing:
+        print(f"WARNING: {HOME_POSE_PATH} is missing joint(s) {missing}; treating home as unverified")
+        return dict(_PLACEHOLDER_HOME), False
+    return pose, bool(payload.get("verified", False))
+
+
+HOME_POSE, HOME_VERIFIED = _load_home()
 
 # --- Camera --------------------------------------------------------------
 CAMERA_INDEX = _env_int("ARMANI_CAMERA_INDEX")  # None -> prompt the operator
@@ -200,6 +250,38 @@ MIC_TEST_SECONDS = 2.0
 # homography calibration. Deliberately left empty: an empty polygon makes
 # gates.py fail closed rather than silently approving an uncalibrated reach.
 TABLE_POLYGON: tuple[tuple[float, float], ...] = ()
+
+# --- Gestures ------------------------------------------------------------
+# One local dataset, one episode per gesture, in this exact order. The operator
+# records it with lerobot-record; see docs/recording_gestures.md.
+GESTURE_DATASET_REPO_ID = os.getenv("ARMANI_GESTURE_REPO_ID", "anikmall/armani_gestures")
+
+_LEROBOT_HOME = Path(
+    os.getenv("HF_LEROBOT_HOME", Path.home() / ".cache" / "huggingface" / "lerobot")
+)
+GESTURE_DATASET_ROOT = Path(
+    os.getenv("ARMANI_GESTURE_ROOT", _LEROBOT_HOME / GESTURE_DATASET_REPO_ID)
+)
+
+GESTURES: dict[str, int] = {
+    "bow": 0,
+    "wave": 1,
+    "dance": 2,
+    "nod_yes": 3,
+    "shake_no": 4,
+    "look_around": 5,
+    "celebrate": 6,
+    "sad_droop": 7,
+}
+GESTURE_RECORD_FPS = 30
+GESTURE_EPISODE_TIME_S = 10
+GESTURE_PREPOSITION_S = 2.0  # slow move onto the episode's first frame
+
+# --- Improvise (safety rule 8) -------------------------------------------
+IMPROVISE_MAX_KEYFRAMES = 8
+IMPROVISE_MIN_SECONDS = 0.3
+IMPROVISE_MAX_SECONDS = 5.0
+IMPROVISE_MAX_RETRIES = 1
 
 # --- Trust gate thresholds ----------------------------------------------
 CONF_APPROVAL = 0.60

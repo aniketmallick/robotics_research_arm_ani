@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import glob
 import time
+from contextlib import AbstractContextManager, nullcontext
 from typing import Protocol
 
 from armani import config, safety
@@ -48,6 +49,8 @@ class Arm(Protocol):
     def read_positions(self) -> Action: ...
     def send(self, action: Action) -> Action: ...
     def disconnect(self) -> None: ...
+    def disable_torque(self) -> None: ...
+    def torque_disabled(self) -> AbstractContextManager[None]: ...
     @property
     def label(self) -> str: ...
 
@@ -70,19 +73,30 @@ class RealArm:
     def send(self, action: Action) -> Action:
         # Hard backstop at the last line before the motors, so safety rule 2
         # holds structurally: no code path can send a value outside what the
-        # hardware can physically do. This clamps to PHYSICAL, not policy —
+        # hardware can plausibly reach. This clamps to BACKSTOP, not policy —
         # policy belongs on targets, and applying it here would forbid the arm
         # from ever leaving a legal-but-conservative-envelope-violating pose.
         # It should never actually change anything; clamp_action logs an ERROR
         # if it does.
         # send_action returns what lerobot ACTUALLY sent after applying
         # max_relative_target, which can differ from what we asked for.
-        safe = safety.clamp_action(action, profile="physical")
+        safe = safety.clamp_action(action, profile="backstop")
         sent = self._robot.send_action(to_feature_keys(safe))  # type: ignore[attr-defined]
         return from_feature_keys(sent)
 
     def disconnect(self) -> None:
         self._robot.disconnect()  # type: ignore[attr-defined]
+
+    def disable_torque(self) -> None:
+        """Go limp. The arm WILL drop — the caller must have warned the operator."""
+        self._robot.bus.disable_torque()  # type: ignore[attr-defined]
+
+    def torque_disabled(self) -> AbstractContextManager[None]:
+        """Torque off inside the block, guaranteed back on after it.
+
+        Used by capture_home so the operator can pose the arm by hand.
+        """
+        return self._robot.bus.torque_disabled()  # type: ignore[attr-defined,no-any-return]
 
 
 class DryRunArm:
@@ -105,7 +119,7 @@ class DryRunArm:
 
     def send(self, action: Action) -> Action:
         # Same clamp as RealArm.send, so dry-run exercises the real guard.
-        action = safety.clamp_action(action, profile="physical")
+        action = safety.clamp_action(action, profile="backstop")
         self._pose = {**self._pose, **action}
         self._sends += 1
         # One line per send is unreadable at 25 Hz; sample it.
@@ -116,6 +130,13 @@ class DryRunArm:
 
     def disconnect(self) -> None:
         print(f"  [dry-run] disconnect after {self._sends} sends")
+
+    def disable_torque(self) -> None:
+        print("  [dry-run] torque OFF (arm would go limp)")
+
+    def torque_disabled(self) -> AbstractContextManager[None]:
+        print("  [dry-run] torque OFF for hand-posing; back ON when done")
+        return nullcontext()
 
 
 # --- Ports ---------------------------------------------------------------
@@ -227,8 +248,21 @@ def connect(
         _safe_disconnect(robot)
         raise
 
+    arm = RealArm(robot, resolved_port, resolved_id)
+
+    # Park Goal_Position at where the arm actually is. lerobot's enable_torque
+    # writes only Torque_Enable and Lock, so until something sets a goal the
+    # servos hold whatever target was last written — possibly from a previous
+    # session. NOTE this cannot prevent a twitch during connect() itself:
+    # configure() runs inside bus.torque_disabled() and re-enables torque before
+    # we get control. It does stop the arm drifting to a stale target afterwards.
+    try:
+        arm.send(arm.read_positions())
+    except Exception as exc:
+        log.warning("could not park the goal position after connect: %s", exc)
+
     log_event("robot_connected", port=resolved_port, robot_id=resolved_id)
-    return RealArm(robot, resolved_port, resolved_id)
+    return arm
 
 
 def _recover_calibration(robot: object, interactive: bool) -> None:
@@ -328,9 +362,11 @@ def goto(
     next_deadline = time.perf_counter()
     for step in steps:
         if not ignore_stop and safety.stop_requested():
-            log.warning("stop requested mid-move; halting at %s", {k: round(v, 1) for k, v in last.items()})
+            # Safety rule 7: freeze. Stop commanding, hold position, and let the
+            # operator decide. Never auto-drive anywhere from the kill switch.
+            log.warning("stop requested mid-move; freezing at %s", {k: round(v, 1) for k, v in last.items()})
             log_event("goto_interrupted", at={k: round(v, 2) for k, v in last.items()})
-            home(arm, slow=True, ignore_stop=True)
+            safety.handle_freeze(arm, current)  # type: ignore[arg-type]
             return last
         last = arm.send(step)
         next_deadline += period
@@ -344,14 +380,21 @@ def goto(
 
 
 def home(arm: Arm, slow: bool = True, ignore_stop: bool = False) -> Action:
-    """Move to the placeholder home pose. Slow by default and on error paths.
+    """Move to the verified home pose. Slow by default.
 
-    Uses the "recorded" profile: this is the kill-switch and error-recovery
-    path, so it must work from any physically legal pose. Clamping HOME_POSE
-    against the conservative policy envelope would be pointless anyway (it sits
-    well inside it) but would leave the recovery path hostage to a future
-    tightening of that envelope.
+    Safety rule 4: refuses outright until the home pose has been captured on
+    hardware by scripts/capture_home.py. Auto-driving to a pose nobody has ever
+    checked is exactly the failure this rule exists to prevent.
+
+    Uses the "recorded" profile because the verified home is a pose the operator
+    physically set — measured reality, like a recording. capture_home warns at
+    capture time if it falls outside the policy envelope.
     """
+    if not config.HOME_VERIFIED:
+        raise RuntimeError(
+            "home pose is not verified — refusing to move to it (safety rule 4). "
+            f"Run: python scripts/capture_home.py   (writes {config.HOME_POSE_PATH})"
+        )
     duration = config.HOME_DURATION_S if slow else config.HOME_DURATION_S / 2
     log.info("homing over %.1fs", duration)
     return goto(

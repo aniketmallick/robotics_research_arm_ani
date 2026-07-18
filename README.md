@@ -7,7 +7,7 @@ safety gates that live in Python, not in a prompt.
 See `CLAUDE.md` for the project constitution and `docs/env_report.md` for what is
 actually installed on this machine.
 
-**Status: stage 1 (foundation + smoke tests) complete.** No feature code yet.
+**Status: stage 2 (gestures + verified home + improvise).** No voice or vision yet.
 
 ## Setup
 
@@ -63,19 +63,65 @@ python scripts/doctor.py --only 3      # just one check
 Exit codes: `0` all passed, `1` at least one FAIL. Each individual test exits
 `0 = PASS`, `1 = FAIL`, `2 = SKIP`.
 
+## How to run — stage 2
+
+Order matters: home must be verified before anything will drive to it.
+
+```bash
+# 1. Pure-logic tests. No hardware, no network.
+pytest tests/ -q
+
+# 2. Capture the home pose by hand.  OPERATOR REQUIRED — torque is released.
+python scripts/capture_home.py --dry-run
+python scripts/capture_home.py
+
+# 3. Record the 8 gestures. See docs/recording_gestures.md for the full runbook.
+#    Then verify them:
+python tests/smoke_07_gestures.py --dry-run     # loads and inspects, no motion
+python tests/smoke_07_gestures.py --gesture bow # OPERATOR REQUIRED — replays it
+
+# 4. Claude-choreographed moves.
+python scripts/improvise_cli.py "do a slow clap" --dry-run
+python scripts/improvise_cli.py "take a proud bow"    # OPERATOR REQUIRED
+```
+
+### Gestures
+
+Eight macros replayed from one local teleop dataset, one episode each:
+`bow, wave, dance, nod_yes, shake_no, look_around, celebrate, sad_droop`.
+
+Frames are streamed at the recorded fps rather than re-interpolated — a recording
+is a performance a human already gave safely, and re-timing it destroys the gesture.
+They are still clamped, with the `recorded` profile. Verified frame-accurate: 280
+frames replay in 9.3 s against 9.3 s recorded, +0.01 s drift.
+
+A recording whose frame-to-frame jump exceeds `MAX_FRAME_DELTA` (8°) is **refused at
+load time**, because lerobot would clip it at send time and play something nobody
+recorded.
+
+### Improvise
+
+Claude returns JSON keyframes; nothing about them is trusted. They are parsed
+defensively (fences and prose stripped), validated hard (≤8 keyframes, 0.3–5 s each,
+known joints only, no unexpected keys, numbers only), clamped to the **`policy`**
+profile — the conservative envelope, because this is LLM-originated motion — and then
+run as ordinary interpolated `goto`s inside `SafeMotion`. A rejected plan earns one
+retry with the error attached, then gives up cleanly.
+
 ### Individual smoke tests
 
 Every test is standalone and every one accepts `--dry-run`.
 
 | Test | What it proves | Needs |
 |---|---|---|
-| `tests/test_safety.py` | clamp/interpolate/envelope logic is correct | nothing (pure logic) |
+| `pytest tests/` | clamp/interpolate/envelope + improvise validator | nothing (pure logic) |
 | `tests/smoke_01_ports.py` | follower connects, reports all 6 joints (commands no motion) | arm plugged in, **operator confirms** |
 | `tests/smoke_02_wiggle.py` | one joint moves ±5° and returns (**MOTION**) | **operator watching the arm** |
 | `tests/smoke_03_camera.py` | a 640x480 frame from the C920 | C920 on its tripod |
 | `tests/smoke_04_mic.py` | 2 s record + playback, rejects silence | headset selected as input |
 | `tests/smoke_05_keys.py` | all three APIs answer | network, `.env` filled in |
 | `tests/smoke_06_ptt.py` | global spacebar hold/release | Input Monitoring granted |
+| `tests/smoke_07_gestures.py` | all 8 gestures load and are playable | recorded dataset |
 
 ```bash
 python tests/smoke_01_ports.py --dry-run
@@ -150,10 +196,19 @@ docs/env_report.md
 * The five body joints are in **degrees**; the **gripper is 0–100 percent**, not degrees.
 * lerobot does **not** clamp degree targets to the calibrated range — `safety.clamp_action()`
   is the only guard against an over-travel command.
-* `config.HOME_POSE` is still an **unverified placeholder**. Smoke 02 deliberately returns to
-  the pose the arm started in rather than driving to it. The kill-switch and error paths *do*
-  home, because safety rule 7 requires it — so verify `HOME_POSE` on hardware early in stage 2.
+* **Home must be verified before anything drives to it.** `motion.home()` raises until
+  `scripts/capture_home.py` has recorded a pose the operator physically set (safety rule 4).
+* **The kill switch freezes, it never drives.** First Ctrl-C (or ESC) stops commanding and holds
+  position, then asks: return to this motion's start, home (only if verified), torque off, or
+  leave it. A **second Ctrl-C** is a hard abort — the arm is left exactly where it is.
+* **Errors return to where the motion began**, not to home, and only the joints that actually
+  moved. If nothing moved, recovery is a no-op.
 * Clamping happens in `Arm.send()`, the last line before the motors, so no caller can bypass it.
-* A **second Ctrl-C** is a hard abort: the arm is left where it is and is *not* homed.
+* **Torque coming back on does not reset the servo's goal.** lerobot's `enable_torque` writes only
+  `Torque_Enable`/`Lock`, so a servo will drive to whatever target was last written — possibly from
+  a previous session. `capture_home` parks the goal at the captured pose before releasing the block,
+  and `connect()` parks it immediately after connecting. A twitch *during* `connect()` itself cannot
+  be prevented (lerobot re-enables torque inside `configure()` before we get control), so keep a
+  hand near the arm when connecting.
 * Calibration already exists and is never recreated. `motion.connect()` passes
   `calibrate=False` so lerobot's interactive recalibration can never be triggered by accident.

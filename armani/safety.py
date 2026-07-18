@@ -47,18 +47,29 @@ class Homeable(Protocol):
     """The slice of the robot API the safety layer needs."""
 
     def read_positions(self) -> Action: ...
-    def send(self, action: Action) -> None: ...
+    def send(self, action: Action) -> Action: ...
+    def disable_torque(self) -> None: ...
 
 
 # --- Clamping ------------------------------------------------------------
 
 
-def clamp_action(action: Action, profile: str = config.DEFAULT_PROFILE) -> Action:
+def clamp_action(
+    action: Action,
+    profile: str = config.DEFAULT_PROFILE,
+    log_clamps: bool = True,
+) -> Action:
     """Return a NEW action with every joint clamped to the given limit profile.
 
     ``profile`` selects which envelope applies — see config.LIMIT_PROFILES:
     "policy" for LLM/IK targets, "recorded" for replayed or measured targets,
-    "physical" for the send-boundary backstop.
+    "backstop" for the send boundary.
+
+    ``log_clamps=False`` is for per-frame callers running at 30 Hz. A recording
+    that rests against a stop clamps on EVERY frame, and logging each one buries
+    the console and writes hundreds of identical entries into the decision log,
+    which is meant to be a readable audit trail. Those callers report a single
+    summary instead — see gestures.frame_clamp_deviation.
 
     Raises on unknown joints and on non-finite values. NaN is rejected
     explicitly because ``min(hi, max(lo, nan))`` evaluates to ``nan`` — every
@@ -84,7 +95,7 @@ def clamp_action(action: Action, profile: str = config.DEFAULT_PROFILE) -> Actio
             raise ValueError(f"joint {joint!r} got non-finite value {numeric!r}")
         low, high = limits[joint]
         result = min(high, max(low, numeric))
-        if result != numeric:
+        if result != numeric and log_clamps:
             # At the "physical" profile this must never fire: the interpolator
             # lerps between a measured start and an already-clamped target, so
             # every step is inside the physical range by construction.
@@ -229,6 +240,78 @@ def install_kill_switch(on_stop: object = None) -> None:
     _install_esc_listener()
 
 
+def handle_freeze(arm: Homeable, motion_start: Action) -> None:
+    """Safety rule 7: the kill switch FREEZES, it never auto-drives anywhere.
+
+    Commanding has already stopped by the time we get here, so the arm is
+    holding position. The operator is present (rule 1) and chooses what happens
+    next. A non-interactive session holds and does nothing at all.
+    """
+    from armani import motion
+
+    log_event("freeze", at={k: round(v, 2) for k, v in motion_start.items()})
+    print("\n[kill switch] FROZEN — holding position. Nothing will move until you choose.")
+
+    if not sys.stdin.isatty():
+        log.warning("not a terminal; holding position and taking no further action")
+        log_event("freeze_choice", choice="hold", reason="non-interactive")
+        return
+
+    home_offer = (
+        "  [h] move to home\n" if config.HOME_VERIFIED else "  [h] home — UNAVAILABLE (not yet verified)\n"
+    )
+    print(
+        "\n  [s] return slowly to where this motion started\n"
+        + home_offer
+        + "  [t] torque OFF — SUPPORT THE ARM FIRST, it will drop\n"
+        "  [l] leave it exactly as-is\n"
+    )
+
+    while True:
+        try:
+            choice = input("Choice [s/h/t/l]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            log_event("freeze_choice", choice="leave", reason="input aborted")
+            return
+
+        if choice == "s":
+            log_event("freeze_choice", choice="return_to_start")
+            # "recorded" profile: the start pose is measured reality and the
+            # policy envelope must not clip it (safety rule 2).
+            motion.goto(
+                arm,  # type: ignore[arg-type]
+                dict(motion_start),
+                duration=config.RECOVERY_DURATION_S,
+                ignore_stop=True,
+                profile="recorded",
+            )
+            return
+        if choice == "h":
+            if not config.HOME_VERIFIED:
+                print("  Home is not verified yet — run scripts/capture_home.py first. (rule 4)")
+                continue
+            log_event("freeze_choice", choice="home")
+            motion.home(arm, slow=True, ignore_stop=True)  # type: ignore[arg-type]
+            return
+        if choice == "t":
+            confirm = input("  Are you physically supporting the arm? It WILL drop. [y/N] ").strip().lower()
+            if confirm not in ("y", "yes"):
+                print("  Not confirmed — torque left on.")
+                continue
+            log_event("freeze_choice", choice="torque_off")
+            try:
+                arm.disable_torque()
+                print("  Torque off. The arm is limp.")
+            except Exception as exc:
+                log.error("could not disable torque: %s", exc)
+            return
+        if choice == "l":
+            log_event("freeze_choice", choice="leave")
+            return
+        print("  Not one of s/h/t/l.")
+
+
 def _install_esc_listener() -> None:
     """Best-effort global ESC listener. Requires macOS Input Monitoring."""
     try:
@@ -292,36 +375,89 @@ def require_operator(action_description: str = "move the arm") -> bool:
 
 @contextmanager
 def SafeMotion(robot: Homeable | None, description: str = "motion"):  # noqa: N802
-    """Guarantee the arm ends up home if anything goes wrong inside the block.
+    """Return the arm to where this block STARTED if anything goes wrong.
 
-    Named as a class for readability at call sites (``with SafeMotion(robot):``).
-    Exceptions are logged, the arm is walked home slowly, and the original
-    exception is re-raised — never swallowed.
+    Safety rule 4: recovery retraces the corridor the arm already traversed
+    safely, rather than driving to HOME_POSE. The entry pose is always
+    known-reachable — the arm was just there a moment ago — and if nothing has
+    moved yet this is a zero-length move.
+
+    Named as a class for readability at call sites (``with SafeMotion(arm):``).
+    The original exception is always re-raised, never swallowed.
     """
     from armani import motion
 
-    log_event("motion_begin", description=description)
+    entry: Action | None = None
+    if robot is not None:
+        try:
+            entry = robot.read_positions()
+        except Exception as exc:
+            # Without an entry pose there is nothing safe to return to, so the
+            # block still runs but recovery degrades to "leave it where it is".
+            log.error("could not read the entry pose; recovery will not move the arm: %s", exc)
+
+    log_event("motion_begin", description=description, entry=_rounded(entry))
     try:
         yield
     except BaseException as exc:
         log.error("%s failed: %s: %s", description, type(exc).__name__, exc)
         log_event("motion_error", description=description, error=f"{type(exc).__name__}: {exc}")
 
-        # The second Ctrl-C is the operator's hard abort. Homing here would
-        # start a fresh multi-second move and make that promise a lie, so the
-        # arm is left exactly where it is and the exception propagates.
+        # Second Ctrl-C is the operator's hard abort (rule 7). Starting a
+        # recovery move here would make that promise a lie.
         if isinstance(exc, KeyboardInterrupt) and stop_requested():
-            print("\n[safety] hard abort — arm left where it is, NOT homing. Check it physically.")
+            print("\n[safety] hard abort — arm left exactly where it is. Check it physically.")
             log_event("hard_abort", description=description)
             raise
 
-        if robot is not None:
+        if robot is not None and entry is not None:
             try:
-                print(f"\n[safety] {type(exc).__name__} during {description} — returning home slowly.")
-                motion.home(robot, slow=True, ignore_stop=True)
-            except Exception as home_exc:
-                log.critical("HOMING FAILED after error: %s. Check the arm physically.", home_exc)
-                log_event("home_failed", error=str(home_exc))
+                moved = _joints_that_moved(robot, entry)
+            except Exception as read_exc:
+                log.error("could not read the current pose; leaving the arm as-is: %s", read_exc)
+                moved = {}
+
+            if not moved:
+                print(f"\n[safety] {type(exc).__name__} during {description} — nothing moved, arm left as-is.")
+                log_event("recovery_skipped", description=description, reason="no joint moved")
+            else:
+                try:
+                    print(
+                        f"\n[safety] {type(exc).__name__} during {description} — "
+                        f"returning {', '.join(sorted(moved))} to where it started."
+                    )
+                    motion.goto(
+                        robot,  # type: ignore[arg-type]
+                        moved,
+                        duration=config.RECOVERY_DURATION_S,
+                        ignore_stop=True,
+                        profile="recorded",
+                    )
+                except Exception as recovery_exc:
+                    log.critical(
+                        "RECOVERY FAILED after error: %s. Check the arm physically.", recovery_exc
+                    )
+                    log_event("recovery_failed", error=str(recovery_exc))
         raise
     else:
         log_event("motion_end", description=description)
+
+
+def _rounded(pose: Action | None) -> dict[str, float] | None:
+    return None if pose is None else {k: round(v, 2) for k, v in pose.items()}
+
+
+def _joints_that_moved(robot: Homeable, entry: Action) -> Action:
+    """Entry values for the joints that actually left their starting position.
+
+    Recovery must not drag joints that never moved. That matters most for a
+    joint parked at its mechanical stop: including it would command a small
+    move on every single error recovery, when the correct answer is to leave it
+    alone. If nothing moved, this is empty and recovery is a no-op.
+    """
+    now = robot.read_positions()
+    return {
+        joint: value
+        for joint, value in entry.items()
+        if joint in now and abs(now[joint] - value) > config.MOVED_EPSILON
+    }

@@ -47,7 +47,9 @@ def main() -> int:
             "the cable carries data (charge-only cables enumerate nothing)."
         )
 
-    if not safety.require_operator("connect to the follower, which energises the motors"):
+    if not safety.require_operator(
+        "connect to the follower — this energises the motors and the arm may twitch"
+    ):
         return skip("operator did not confirm presence")
 
     try:

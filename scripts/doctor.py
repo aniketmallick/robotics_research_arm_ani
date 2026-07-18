@@ -42,15 +42,17 @@ class Check:
     needs_hardware: bool
     note: str
     accepts_dry_run: bool = True
+    use_pytest: bool = False
 
 
 CHECKS: tuple[Check, ...] = (
     Check(
-        "test_safety.py",
-        "Safety core regression tests",
+        "pytest",
+        "Safety + improvise validator tests",
         False,
         "nothing — pure logic, runs first so a broken clamp never reaches hardware",
         accepts_dry_run=False,
+        use_pytest=True,
     ),
     Check("smoke_01_ports.py", "Serial ports + follower connection", True, "arm plugged in, USB data cable"),
     Check("smoke_02_wiggle.py", "5 degree wiggle (MOTION)", True, "OPERATOR MUST WATCH THE ARM"),
@@ -58,6 +60,7 @@ CHECKS: tuple[Check, ...] = (
     Check("smoke_04_mic.py", "Microphone record + playback", True, "wired headset selected as input"),
     Check("smoke_05_keys.py", "OpenAI / Gemini / Anthropic keys", False, "network + .env filled in"),
     Check("smoke_06_ptt.py", "Global spacebar (push-to-talk)", False, "Input Monitoring granted"),
+    Check("smoke_07_gestures.py", "Recorded gesture macros", True, "gesture dataset recorded; live replay moves the arm"),
 )
 
 
@@ -67,7 +70,12 @@ def run(check: Check, dry_run: bool) -> int:
     print(f"  needs: {check.note}")
     print("=" * 72)
 
-    command = [sys.executable, str(TESTS_DIR / check.script)]
+    if check.use_pytest:
+        # These are pytest modules with no __main__ block: running them as plain
+        # scripts would import cleanly, execute nothing and exit 0 — a false PASS.
+        command = [sys.executable, "-m", "pytest", str(TESTS_DIR), "-q"]
+    else:
+        command = [sys.executable, str(TESTS_DIR / check.script)]
     if dry_run and check.accepts_dry_run:
         command.append("--dry-run")
     # The child writes straight to fd 1. Without this flush our buffered header

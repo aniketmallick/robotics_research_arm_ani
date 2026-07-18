@@ -103,6 +103,53 @@ were "outside limits", so it refused — taking the kill switch and every error-
 with it. Fixed by splitting into the `policy` / `recorded` / `physical` profiles described in
 the README, locked in by `tests/test_safety.py`.
 
+## lerobot 0.5.2 dataset & replay API (stage 2 findings)
+
+Stage 3 builds on this layer, so here is what actually holds.
+
+**Loading is easy and offline.** Verified against an existing local dataset:
+
+```python
+ds = LeRobotDataset(repo_id, root=<local path>, episodes=[i])   # 0.32 s, HF_HUB_OFFLINE=1
+actions = ds.hf_dataset.select_columns("action")["action"]      # no video decode
+names   = ds.meta.features["action"]["names"]  # ['shoulder_pan.pos', ... 'gripper.pos']
+```
+
+`episodes=[i]` really does filter — `num_episodes` becomes 1 and `num_frames` is that
+episode's length. `select_columns` never touches the video files, so replay loading stays
+fast even on a dataset recorded with cameras.
+
+**Surprises worth carrying into stage 3:**
+
+1. **Datasets are v3.0 format**; `meta/` holds `episodes/` (a directory), `info.json`,
+   `stats.json`, `tasks.parquet`. `total_episodes` lives in `info.json`.
+2. **An out-of-range episode raises `ValueError: Instruction "train" corresponds to no data!`** —
+   useless to an operator who recorded 3 of 8 gestures. `gestures.load_gesture` checks
+   `total_episodes` itself first and says which gestures are missing.
+3. **Nothing in the metadata records `use_degrees`.** A dataset recorded with
+   `use_degrees=false` stores normalised −100..100 and replays as silently wrong angles.
+   The only available signal is the value range, so `gestures._check_units` warns when no
+   joint exceeds 100. The runbook pins `--robot.use_degrees=true`.
+4. **Real teleop violates the interpolation speed budget.** Measured frame-to-frame deltas on
+   an existing episode: up to **6.16** (gripper), 4.04 (shoulder_lift), 3.08 (elbow_flex) at
+   30 fps, against a `MAX_JOINT_SPEED/CONTROL_HZ` budget of 1.50. A `max_relative_target`
+   derived from that budget would have silently clipped every replay. `MAX_FRAME_DELTA = 8.0`
+   is sized off recorded reality instead, and interp_move keeps enforcing 1.8°/step for
+   interpolated motion.
+5. **Real teleop also violates the policy envelope** — episodes start at
+   `shoulder_lift ≈ −107.9`, which `policy` would clip by ~48°. This is the empirical
+   justification for the `recorded` profile in safety rule 2.
+6. **`enable_torque` does not set `Goal_Position`.** It writes only `Torque_Enable` and `Lock`,
+   so a servo drives to whatever goal was last written — possibly from a previous session.
+   Both `capture_home` (before releasing its `torque_disabled` block) and `connect()`
+   (immediately after connecting) now park the goal at the measured pose. A twitch *during*
+   `connect()` cannot be prevented: `configure()` re-enables torque before we get control.
+7. **`cv2` and `av` ship duplicate `libavdevice` dylibs.** Every lerobot CLI prints an
+   objc warning about "spurious casting failures and mysterious crashes". Harmless so far;
+   the gesture recording avoids cameras entirely, which sidesteps it.
+8. **CLI robot type is still `so101_follower`** even though the class is `SOFollower`, and
+   `so101_leader` for the teleoperator. Both verified present in `lerobot-record --help`.
+
 ## Serial ports
 
 `ls /dev/tty.usbmodem*` → **no matches at the time of writing. Both arms are unplugged.**
