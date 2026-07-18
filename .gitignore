@@ -1,0 +1,17 @@
+# Secrets — never commit.
+# Match every .env variant (.env.local, .env.bak, editor backups) and allow only
+# the checked-in template back in. An exact ".env" rule is not enough: a stray
+# ".env.bak" is just as much of a key leak.
+.env*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Runtime artefacts — keep the directories, ignore their contents
+logs/*
+!logs/.gitkeep
+tests/out/

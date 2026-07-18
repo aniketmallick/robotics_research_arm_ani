@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SO-101 Voice Robot — Architecture Explainer</title>
+<style>
+  :root{
+    --ink:#1a1d27; --muted:#5b6172; --line:#d8dbe4; --bg:#f6f7fa; --card:#ffffff;
+    --accent:#4f46e5; --accent-soft:#eef0fe; --amber:#b45309; --amber-soft:#fff5e6;
+    --green:#0f766e; --green-soft:#e6f5f3; --red:#b91c1c; --red-soft:#fdecec;
+    --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--ink);line-height:1.5;padding:32px 16px 64px}
+  .wrap{max-width:880px;margin:0 auto}
+  h1{font-size:26px;letter-spacing:-.02em}
+  .sub{color:var(--muted);margin:6px 0 28px;font-size:14px}
+  h2{font-size:17px;margin:36px 0 14px;display:flex;align-items:center;gap:8px}
+  .qnum{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:var(--accent);color:#fff;font-size:12px;font-weight:700;flex:none}
+  .box{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:0 1px 2px rgba(20,22,40,.04)}
+  .flow{display:flex;flex-direction:column;align-items:stretch;gap:0}
+  .arrow{display:flex;justify-content:center;color:var(--muted);font-size:12px;padding:4px 0}
+  .arrow span{background:var(--bg);padding:0 8px}
+  .arrow::before{content:''}
+  .stage{position:relative}
+  .tag{position:absolute;top:-9px;left:14px;background:var(--accent);color:#fff;font-size:10.5px;font-weight:700;letter-spacing:.06em;padding:2px 8px;border-radius:99px;text-transform:uppercase}
+  .tag.g{background:var(--green)} .tag.a{background:var(--amber)}
+  .stage .box{padding-top:20px}
+  .title{font-weight:700;font-size:15px}
+  .desc{color:var(--muted);font-size:13px;margin-top:3px}
+  .chip{display:inline-block;background:var(--accent-soft);color:var(--accent);font-size:11.5px;font-weight:600;border-radius:6px;padding:2px 8px;margin:6px 6px 0 0}
+  .chip.warn{background:var(--amber-soft);color:var(--amber)}
+  .chip.ok{background:var(--green-soft);color:var(--green)}
+  .tools{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-top:10px}
+  .tool{border:1px dashed var(--line);border-radius:10px;padding:10px 12px;background:#fbfbfd}
+  .tool code{font-family:var(--mono);font-size:12.5px;color:var(--accent);font-weight:700}
+  .tool p{font-size:12px;color:var(--muted);margin-top:4px}
+  .gates{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  .gate{flex:1 1 150px;border-radius:10px;padding:9px 11px;font-size:12px;background:var(--green-soft);border:1px solid #cfe8e4}
+  .gate b{display:block;font-size:12px;color:var(--green)}
+  .gate.warn{background:var(--amber-soft);border-color:#f3ddb5}
+  .gate.warn b{color:var(--amber)}
+  .gate .say{color:var(--muted);font-style:italic}
+  .qa{margin-top:10px}
+  .qa .box{margin-bottom:12px}
+  .qa b.q{display:block;font-size:14px;margin-bottom:4px}
+  .qa p{font-size:13.5px;color:#333949;margin-top:6px}
+  .qa p b{color:var(--ink)}
+  .mini{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+  .mini .m{flex:1 1 220px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:12.5px;background:#fbfbfd}
+  .m .h{font-weight:700;margin-bottom:4px}
+  .m.win{border-color:#9fd6cf;background:var(--green-soft)}
+  .m.win .h{color:var(--green)}
+  .pipe{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:10px;font-size:12.5px}
+  .pipe .p{background:#fbfbfd;border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-family:var(--mono);font-size:11.5px}
+  .pipe .sep{color:var(--muted)}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px;background:var(--card);border-radius:12px;overflow:hidden}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#f0f1f6;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+  tr:last-child td{border-bottom:none}
+  td b{font-size:13px}
+  .note{font-size:12.5px;color:var(--muted);margin-top:8px}
+  pre{background:#14161f;color:#e6e8f0;border-radius:12px;padding:14px 16px;font-family:var(--mono);font-size:12px;line-height:1.6;overflow-x:auto;margin-top:10px;white-space:pre-wrap}
+  pre .c{color:#8a91a8}
+  .speak{color:#7dd3b9;font-style:italic}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>How your robot works</h1>
+<div class="sub">SO-101 + C920 + your voice · the <b>no-training</b> architecture · hackathon reference sheet</div>
+
+<!-- ================= MAIN FLOW ================= -->
+<div class="flow">
+
+  <div class="stage"><span class="tag">You</span>
+    <div class="box">
+      <div class="title">🎙️ Hold spacebar → talk → release</div>
+      <div class="desc">"Yo, pick up the banana." Wired headset mic. Push-to-talk, never open mic in a loud hall.</div>
+    </div>
+  </div>
+
+  <div class="arrow"><span>▼ raw audio (no transcription step — audio goes straight in)</span></div>
+
+  <div class="stage"><span class="tag">The brain — ①②</span>
+    <div class="box">
+      <div class="title">🧠 OpenAI Realtime API (gpt-realtime-2.1) — ears + brain + mouth in ONE model</div>
+      <div class="desc">There is <b>no separate STT or TTS</b> in this design. One model hears your audio, thinks, and speaks back — ~0.5–0.8s. Your Gen-Z persona is just its system prompt. It can also keep talking <i>while</i> the arm moves (async tool calls).</div>
+      <span class="chip">persona = system prompt</span><span class="chip">tool calling</span><span class="chip">barge-in built in</span><span class="chip ok">it roasts you here</span>
+    </div>
+  </div>
+
+  <div class="arrow"><span>▼ the brain never touches motors — it presses labeled buttons (tools) that YOUR python code implements</span></div>
+
+  <div class="stage"><span class="tag a">The buttons (tools)</span>
+    <div class="box">
+      <div class="tools">
+        <div class="tool"><code>see()</code> — ③ the eyes<p>Snap C920 frame → <b>Gemini Robotics-ER</b> points at objects, <b>OWLv2</b> scores them → list goes back to the brain as text.</p></div>
+        <div class="tool"><code>play_gesture("bow")</code> — ④<p>Replays a teleop episode you recorded once. A macro, not ML. Deterministic. bow · wave · dance · nod · shake · celebrate · droop · look-around.</p></div>
+        <div class="tool"><code>improvise_move("slow clap")</code><p>Claude writes joint keyframes on the fly, safety-clamped (±angles, ≤5s, ≤8 moves). For gestures you never recorded.</p></div>
+        <div class="tool"><code>pick("banana")</code><p>The full pipeline below — gated by the trust layer first.</p></div>
+        <div class="tool"><code>stop() / home()</code><p>Always available. Fail-closed.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><span>▼ before any risky action</span></div>
+
+  <div class="stage"><span class="tag g">Trust gates — the startup</span>
+    <div class="box">
+      <div class="gates">
+        <div class="gate"><b>G1 · Do I see it?</b><span class="say">"There's no banana here. Be so real."</span></div>
+        <div class="gate"><b>G2 · Which one?</b><span class="say">"Two cups. Red or white? Use your words."</span></div>
+        <div class="gate"><b>G3 · Can I reach?</b><span class="say">"That's outside my reach. I have limits, unlike your ambition."</span></div>
+        <div class="gate warn"><b>G4 · Confident? &lt;60% → approval</b><span class="say">"I'm at 34%. That's a gamble. Say yes if you're feeling brave." · 10s silence → stands down</span></div>
+        <div class="gate"><b>G5 · Did it work?</b><span class="say">Fresh photo → verify → "Secured. Obviously."</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><span>▼ only after gates pass</span></div>
+
+  <div class="stage"><span class="tag">Pick pipeline — ⑥</span>
+    <div class="box">
+      <div class="pipe">
+        <span class="p">pixel (712, 419)</span><span class="sep">→</span>
+        <span class="p">homography 🗺️ (the translator)</span><span class="sep">→</span>
+        <span class="p">table (18cm, 12cm)</span><span class="sep">→</span>
+        <span class="p">IK → joint angles</span><span class="sep">→</span>
+        <span class="p">hover → descend → grip → lift</span>
+      </div>
+      <div class="desc" style="margin-top:8px">The camera speaks in pixels; the robot speaks in centimeters. The <b>homography</b> is the one-time translation between them — that's what the ChArUco board builds (see ⑥ below).</div>
+    </div>
+  </div>
+
+  <div class="arrow"><span>▼</span></div>
+
+  <div class="stage"><span class="tag">Muscle</span>
+    <div class="box">
+      <div class="title">🦾 LeRobot → <code style="font-family:var(--mono);font-size:13px">robot.send_action()</code> → SO-101 servos</div>
+      <div class="desc">Plus a <b>dashboard screen</b> next to the robot: live camera, boxes, confidence bars, which gate fired. Judges watch this screen — it's the "robot's mind."</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= Q&A ================= -->
+<h2><span class="qnum">1</span> STT / TTS — and where Mistral fits</h2>
+<div class="qa"><div class="box">
+  <p>There are two ways to build a voice loop. The <b>cascade</b>: three separate workers passing notes — STT transcribes audio→text, an LLM thinks in text, TTS turns the reply into audio. <b>Mistral's Voxtral</b> (what the Cyberwave tutorial used) is an STT model — it's <i>one third</i> of that cascade, same job as Whisper.</p>
+  <p>The <b>Realtime API</b> collapses all three into one model: audio in → audio out. Faster (~0.5–0.8s vs ~1.5s), natural interruptions, and it never "mis-reads a transcript" because there is no transcript in the middle.</p>
+  <div class="mini">
+    <div class="m"><div class="h">Cascade (3 parts)</div>mic → Voxtral/Whisper → GPT/Claude → ElevenLabs → speaker<br><span style="color:var(--muted)">+ cheap, modular, survives bad wifi with local Whisper · − slower, 3 things to wire</span></div>
+    <div class="m win"><div class="h">Realtime (1 part) ← we use this</div>mic → gpt-realtime-2.1 → speaker<br><span style="color:var(--muted)">+ fastest, barge-in, talks while arm moves · − pricier, needs internet</span></div>
+  </div>
+  <p class="note">We build Realtime as primary and keep a cascade fallback (faster-whisper + gpt-4o-mini + TTS) in the back pocket for venue-wifi apocalypse.</p>
+</div></div>
+
+<h2><span class="qnum">2</span> The LLM — who understands and who acts</h2>
+<div class="qa"><div class="box">
+  <p>The Realtime model <b>is</b> the LLM — a GPT-class brain that happens to have ears and a mouth. You don't add another one for conversation.</p>
+  <p><b>How acting works:</b> you register python functions as "tools." When you say "pick up the banana," the model doesn't move anything — it emits a tool call: <code style="font-family:var(--mono)">pick("banana")</code>. <b>Your python code</b> then runs the cameras, math, and motors, and returns a result ("gripped, verified ✅"). The model reads that result and speaks: "Banana secured. You're welcome." Brain decides, your code executes. Clean separation.</p>
+  <p><b>Claude</b> appears once, as a specialist inside one tool: <code style="font-family:var(--mono)">improvise_move()</code> — it's good at writing structured JSON keyframes for novel gestures. Optional but a great party trick.</p>
+</div></div>
+
+<h2><span class="qnum">3</span> The VLM — the eyes, called on demand</h2>
+<div class="qa"><div class="box">
+  <p>The VLM is <b>not in the conversation loop</b> — it lives inside the <code style="font-family:var(--mono)">see()</code> and <code style="font-family:var(--mono)">pick()</code> tools. When called: your code snaps a C920 frame → sends it to <b>Gemini Robotics-ER 1.6</b> (a Google model trained for robots — returns exact pixel points on named objects) → also runs <b>OWLv2</b> locally (returns honest confidence scores per object). Results come back as text; the brain talks about them.</p>
+  <p>Why two? Gemini = best-in-class open-vocabulary pointing. OWLv2 = real probability numbers for the confidence gate (Gemini's self-reported confidence isn't calibrated). When they agree, confidence is high. When they disagree — that itself is a "low confidence, ask the human" signal.</p>
+  <p class="note">Do NOT use GPT-4o for locating objects — it's documented to fail at bounding boxes. OpenAI runs the mouth; Gemini/OWLv2 run the eyes.</p>
+</div></div>
+
+<h2><span class="qnum">4</span> Recording vs training — two different things</h2>
+<div class="qa"><div class="box">
+  <p><b>Recording: yes (1 hour). Training: no (0 hours).</b></p>
+  <p>You'll <b>record ~8 gesture episodes</b> via teleop (you puppet the bow once with the leader arm; it's saved). But that's a <b>macro</b> — pressed play, executed identically every time, like a playlist. Zero machine learning involved.</p>
+  <p><b>Training</b> (ACT/SmolVLA — showing a model 50 demos so it learns a behavior) is NOT needed for anything in the demo. Optional: run one ACT training on Colab overnight (~$3) purely as a "here's our roadmap with learned policies" slide. It never touches the live demo.</p>
+</div></div>
+
+<h2><span class="qnum">5</span> New object or new gesture at runtime — will it work?</h2>
+<div class="qa"><div class="box">
+  <p><b>New object → YES, and it's your best demo moment.</b> Gemini and OWLv2 are open-vocabulary: they can find things nobody planned for. Ask a judge to put THEIR pen or phone-stand on the table and say "pick that up." Two caveats: it must physically fit the gripper top-down, and be inside reach — and if not, the trust gates catch it and the robot says so (which is the pitch!).</p>
+  <p><b>New gesture → recorded macros are fixed</b> (only the 8 you made), but <code style="font-family:var(--mono)">improvise_move()</code> covers novel ones: "do a slow clap" → Claude writes keyframes → clamped → executed. Goofy but charming, and safe by construction.</p>
+  <p><b>The flip side — and why we don't train:</b> a trained ACT policy is the OPPOSITE. It repeats the one task it learned, with the same camera angle, same-ish object positions. New object? Fails. Camera nudged 2cm? Fails. Our no-training stack generalizes; the trained stack memorizes.</p>
+</div></div>
+
+<h2><span class="qnum">6</span> ChArUco — what, why, and the "can't we just use the table?" answer</h2>
+<div class="qa"><div class="box">
+  <p><b>What:</b> a printed checkerboard with QR-like markers. You show it to the camera once, flat on the table.</p>
+  <p><b>Why it exists:</b> the camera says "banana at pixel (712, 419)." The robot needs "banana at (18cm, 12cm) from my base." Those are two different languages, and <i>nothing</i> in the system can translate without calibration — a single RGB camera has no depth, so a pixel alone doesn't pin a location. The saving trick: everything sits on ONE flat plane (the table). Given that, a single 3×3 matrix — the <b>homography</b> — converts any pixel to exact table coordinates. The board just gives OpenCV dozens of precisely-known points to compute that matrix in one shot. 10 minutes, done once. (If the camera gets bumped: redo, 5 min. So: tape the camera.)</p>
+  <p><b>Do you NEED the board? No — you need the matrix.</b> Three ways to get pixel→cm, in order of preference:</p>
+  <div class="mini">
+    <div class="m win"><div class="h">A · ChArUco board</div>Print, place, one script. Most accurate, fastest. What Google's SO-101 sample uses.</div>
+    <div class="m"><div class="h">B · Gripper-tip method (no printer)</div>Jog the gripper tip to 6 spots; record robot XY (from kinematics) + pixel of the tip; <span style="font-family:var(--mono);font-size:11px">cv2.findHomography</span>. 20 min, slightly less accurate.</div>
+    <div class="m"><div class="h">C · Taught zones (no math at all)</div>5 marked spots, one recorded pick macro each. VLM only chooses WHICH zone. Guaranteed to work — the fallback if A/B fight you.</div>
+  </div>
+</div></div>
+
+<!-- ================= TRADEOFFS ================= -->
+<h2>⚖️ The tradeoffs, honestly</h2>
+<table>
+  <tr><th>Choice</th><th>We chose</th><th>What it costs you</th></tr>
+  <tr><td><b>Voice</b></td><td>Realtime API (1 model)</td><td>~$0.2–0.5/min & needs internet → keep cascade fallback + phone hotspot</td></tr>
+  <tr><td><b>Manipulation</b></td><td>VLM eyes + homography + IK (no training)</td><td>Motion looks scripted, not "learned"; top-down grasps only. In return: works on new objects, debuggable at 3am</td></tr>
+  <tr><td><b>Trained policy (ACT)</b></td><td>Optional roadmap slide only</td><td>You give up "we trained a neural policy" bragging in the live demo — say it's the roadmap, with the overnight run as proof</td></tr>
+  <tr><td><b>Gestures</b></td><td>Recorded macros + LLM improvisation</td><td>Macros are rigid; improv is wobbly. Together they cover reliable + novel</td></tr>
+  <tr><td><b>Calibration</b></td><td>ChArUco (fallbacks B/C ready)</td><td>10 min setup + camera must not move → tape it, keep board handy</td></tr>
+  <tr><td><b>Mic</b></td><td>Push-to-talk headset</td><td>Less "magical" than open mic — but zero false triggers in a loud hall. VCs don't dock points for a spacebar</td></tr>
+</table>
+
+<!-- ================= PERSONA ================= -->
+<h2>😤 The Gen-Z persona (it's just a prompt)</h2>
+<pre><span class="c"># excerpt of the Realtime system prompt — tune the dial to taste</span>
+You are ARM-ANI, a robot arm with Gen-Z energy. Deadpan, straightforward,
+zero corporate politeness. Short sentences. You roast the user when they
+slip up — lovingly, never mean. You NEVER fake abilities: if confidence
+is low, you say the number and ask. If something's unreachable, say so.
+Keep replies under 2 sentences unless asked. No emoji in speech.
+
+<span class="c"># the vibe:</span>
+<span class="speak">user: "pick up the... uh... the thing"</span>
+<span class="speak">you:  "The thing. Iconic. I see a banana, a cup, and a cube — pick a lane."</span>
+<span class="speak">user: (asks for object at edge of reach)</span>
+<span class="speak">you:  "I'm at 34% on that. That's not confidence, that's a coin toss. Approve it or move it closer."</span>
+<span class="speak">user: (gesture request)</span>
+<span class="speak">you:  "A bow? For you? ...fine." *bows*</span></pre>
+
+<div class="note" style="margin-top:20px">Build order stays as the battle plan: rig lock → gestures + voice (hour 4 milestone: talking, roasting, bowing robot) → eyes + calibration → grasp → trust gates → dashboard → rehearse ×5 → backup video.</div>
+
+</div>
+</body>
+</html>
