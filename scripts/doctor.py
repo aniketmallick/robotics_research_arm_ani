@@ -48,7 +48,7 @@ class Check:
 CHECKS: tuple[Check, ...] = (
     Check(
         "pytest",
-        "Safety + improvise validator tests",
+        "Pure-logic tests (safety, improvise, IK, homography, vision parsing)",
         False,
         "nothing — pure logic, runs first so a broken clamp never reaches hardware",
         accepts_dry_run=False,
@@ -62,7 +62,18 @@ CHECKS: tuple[Check, ...] = (
     Check("smoke_06_ptt.py", "Global spacebar (push-to-talk)", False, "Input Monitoring granted"),
     Check("smoke_07_gestures.py", "Recorded gesture macros", True, "gesture dataset recorded; live replay moves the arm"),
     Check("smoke_08_agent.py", "Realtime voice agent", False, "OPENAI_API_KEY for the text round trip; live session is run separately"),
+    Check("smoke_09_vision.py", "Gemini points at a named object", True, "C920 + GOOGLE_API_KEY; the demo object on the table. No motion."),
+    Check(
+        "smoke_10_hover.py",
+        "Hover over a named object (MOTION)",
+        True,
+        "OPERATOR MUST WATCH THE ARM; needs a saved homography and a verified home",
+    ),
 )
+
+# Tests that move the arm. --skip-motion skips exactly these, so adding a moving
+# test here is the one thing needed to keep that flag honest.
+MOTION_SCRIPTS = ("smoke_02_wiggle.py", "smoke_10_hover.py")
 
 
 
@@ -122,7 +133,9 @@ def run(check: Check, dry_run: bool) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="ARM-ANI dependency doctor.")
     parser.add_argument("--dry-run", action="store_true", help="run every test in dry-run mode")
-    parser.add_argument("--skip-motion", action="store_true", help="skip smoke 02 (the only test that moves)")
+    parser.add_argument(
+        "--skip-motion", action="store_true", help="skip the tests that move the arm (02, 10)"
+    )
     parser.add_argument("--only", metavar="N", help="run one check by number, e.g. --only 3")
     args = parser.parse_args()
 
@@ -145,7 +158,7 @@ def main() -> int:
         )
         return 1
     else:
-        print("mode   : LIVE — smoke 02 will move the arm after you confirm")
+        print("mode   : LIVE — smoke 02 and 10 will move the arm after you confirm")
 
     checks = list(CHECKS)
     if args.only:
@@ -156,7 +169,7 @@ def main() -> int:
 
     results: list[tuple[Check, int]] = []
     for check in checks:
-        if args.skip_motion and check.script.startswith("smoke_02"):
+        if args.skip_motion and check.script in MOTION_SCRIPTS:
             print(f"\n  skipping {check.script} (--skip-motion)")
             results.append((check, SKIP))
             continue
@@ -181,7 +194,7 @@ def main() -> int:
     print()
     if failed:
         print(f"  {len(failed)} FAILED: {', '.join(failed)}")
-        print("  Fix these before stage 2 — read each test's output above for the exact reason.")
+        print("  Fix these before moving on — read each test's output above for the exact reason.")
     if skipped:
         print(f"  {len(skipped)} skipped: {', '.join(skipped)}")
     if args.dry_run:

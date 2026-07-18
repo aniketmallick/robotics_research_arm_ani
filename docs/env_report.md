@@ -252,3 +252,132 @@ Checked by `tests/smoke_05_keys.py`, which prints presence only and never a valu
 Gemini answering on the first-choice model means no fallback is needed for stage 4.
 
 **Operator action:** create `.env` from `.env.example` and add the OpenAI and Anthropic keys.
+
+---
+
+# Stage 4 findings — eyes, homography and the IK ladder
+
+## IK ladder: Plan A works (placo + lerobot `RobotKinematics`)
+
+`lerobot.model.kinematics.RobotKinematics` exists in 0.5.2 and drives **placo**.
+placo was NOT installed, and installing it is the one dependency risk in this stage,
+because pip's first solution wanted to pull `numpy` from 2.2.6 up to 2.3.5 — i.e. to
+move a pin underneath the working teleop environment.
+
+**What was done instead** (numpy held at the installed version with a constraint file):
+
+```bash
+python -m pip install -c constraints.txt placo   # constraints.txt: numpy==2.2.6
+python -m pip install -c constraints.txt "cmeel-urdfdom==4.0.1" "cmeel-tinyxml2==10.0.0"
+```
+
+The two extra pins are required: holding numpy back makes pip select `placo 0.9.16`,
+whose binary links `liburdfdom_sensor.4.0` and `libtinyxml2.10`, while the unconstrained
+solve would have paired it with urdfdom 6.0.0 / tinyxml2 11.0.0. Mismatched cmeel wheels
+fail at *import* time with a `dlopen` error, not at install time.
+
+Resulting versions: `placo 0.9.16`, `pin 3.4.0`, `eigenpy 3.10.3`, `cmeel-urdfdom 4.0.1`,
+`cmeel-tinyxml2 10.0.0`.
+
+**Verified unchanged after the install:** numpy 2.2.6, cv2 4.13.0, torch 2.11.0,
+lerobot 0.5.2, and `from lerobot.robots.so_follower import SO101Follower` still imports.
+Nothing about teleop moved.
+
+## URDF provenance
+
+`armani/data/so101_kin.urdf` is `so101_new_calib.urdf` from
+[TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100)
+(`Simulation/SO101/so101_new_calib.urdf`, Apache-2.0), with **all 34 `<visual>` and
+`<collision>` elements removed**. placo refuses to load a URDF whose referenced STL
+meshes are absent, and inverse kinematics needs only joints, origins and limits — so
+stripping the geometry avoids vendoring 13 binary meshes for nothing.
+
+Regenerate:
+
+```bash
+curl -sSLO https://raw.githubusercontent.com/TheRobotStudio/SO-ARM100/main/Simulation/SO101/so101_new_calib.urdf
+python -c "
+import xml.etree.ElementTree as ET
+t=ET.parse('so101_new_calib.urdf'); r=t.getroot()
+for link in r.iter('link'):
+    for tag in ('visual','collision'):
+        for el in list(link.findall(tag)): link.remove(el)
+t.write('armani/data/so101_kin.urdf', encoding='utf-8', xml_declaration=True)"
+```
+
+Joint names match ours exactly (`shoulder_pan, shoulder_lift, elbow_flex, wrist_flex,
+wrist_roll, gripper`) and the frame `gripper_frame_link` exists — it is the IK target.
+
+### URDF zero == calibrated zero (assumed, corroborated, still needs the arm)
+
+lerobot's own `robot_kinematic_processor.py` feeds raw calibrated `.pos` degrees straight
+into `forward_kinematics`, so the library itself assumes the two conventions coincide.
+The joint ranges corroborate it — URDF limits vs the ranges derived from this robot's
+calibration file line up closely:
+
+| joint | URDF | our `PHYSICAL_LIMITS` |
+|---|---|---|
+| shoulder_pan | ±110.0 | ±114.9 |
+| shoulder_lift | ±100.0 | ±111.0 |
+| elbow_flex | ±96.8 | ±97.7 |
+| wrist_flex | ±95.0 | ±96.3 |
+| wrist_roll | -157.2 .. +162.8 | ±180.0 |
+
+**This has not been confirmed on hardware.** `tests/smoke_10_hover.py` is the test that
+confirms it: if FK disagrees with reality, the arm hovers somewhere other than the object
+and the operator sees it immediately.
+
+### `inverse_kinematics` has no success signal
+
+It is a *single* soft-QP step (`solver.solve(True)`), not an iterate-to-convergence solve,
+and it returns joint angles whether or not they achieve anything. lerobot gets away with
+calling it once per tick because teleop deltas are tiny. `armani/kinematics.py` therefore
+iterates it to rest **and verifies the answer with forward kinematics**, reporting failure
+rather than returning a plausible-looking pose. It also hands placo our *policy* limits
+(`set_joint_limits` + `enable_joint_limits`) so solutions are policy-legal by construction
+instead of being clamped afterwards behind the verification.
+
+## Top-down reach inside the policy envelope — the constraint that shapes stage 5
+
+Brute-force sweep of the policy envelope (±60° on shoulder_lift / elbow_flex / wrist_flex),
+`shoulder_pan = 0`, reporting the reachable radius *r* in metres:
+
+| approach lean | z=+0.15 | z=+0.12 | z=+0.10 | z=+0.08 | z=+0.05 | z=0.00 | z=-0.05 |
+|---|---|---|---|---|---|---|---|
+| ≤5° (vertical) | — | — | — | — | — | 0.14–0.26 | 0.15–0.30 |
+| ≤15° | — | — | — | — | — | 0.13–0.32 | 0.12–0.34 |
+| ≤25° | — | — | — | — | 0.19–0.33 | 0.13–0.37 | 0.09–0.36 |
+| ≤35° | — | — | 0.24–0.33 | 0.21–0.36 | 0.19–0.38 | 0.13–0.39 | 0.06–0.38 |
+| ≤45° | 0.30 | 0.23–0.38 | 0.21–0.40 | 0.20–0.40 | 0.19–0.41 | 0.13–0.42 | 0.03–0.40 |
+
+Read it:
+
+* A **near-vertical approach only exists at z ≤ 0 m** inside the policy envelope.
+* At a 10 cm hover the best achievable lean is about **35°**. This is why
+  `HOVER_MAX_TILT_DEG` is 40 and not 5 — hover constrains *position* and reports the lean.
+* It is not purely a policy artefact: even at full URDF limits, vertical at z=0.10 m is a
+  razor-thin band (r 0.189–0.219) and z=0.12 m is impossible. The SO-101 simply cannot
+  fold far enough over itself to point straight down 10 cm up.
+
+**Consequence for stage 5 (architect's call, not mine):** a vertical grasp at z≈0 is
+available for r 0.14–0.26, but the overlap with a policy-legal 10 cm hover over the *same*
+(x, y) is only **r 0.24–0.26** — very tight. Options: relax the pitch-joint policy limits
+(a safety rule 2 change), lower `HOVER_HEIGHT_M`, or mount the arm on a riser so
+`TABLE_HEIGHT_M` goes negative and the whole table moves into the easy part of the
+envelope. All of the above assume `TABLE_HEIGHT_M = 0`; the operator measures it.
+
+## Camera calibration
+
+OpenCV 4.13.0 has full `cv2.aruco` including `CharucoBoard` / `CharucoDetector`, and
+highgui works (needed for click-to-pick in the gripper-tip method). Both
+`opencv-python` and `opencv-python-headless` are installed; `namedWindow` succeeds.
+
+The ChArUco path is verified end-to-end on a synthetic render in `tests/test_calibrate.py`
+(24 corners detected, homography fit to 0.009 px), so only the physical board and the
+operator's ruler are untested.
+
+**Note on method choice:** ChArUco is the specified primary and is fast, but it can only
+give *pixel* accuracy — the *robot* coordinates come from the operator measuring where the
+board sits, so a 5 mm ruler slip shifts the entire map 5 mm. The gripper-tip method needs
+no ruler at all: forward kinematics supplies exact robot coordinates and the robot
+effectively measures itself. If the first hover is visibly off, try `--method tip`.

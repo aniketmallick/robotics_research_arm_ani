@@ -121,6 +121,61 @@ own input while you decide, then resumes. The background motion worker never pro
 on stdin itself.
 
 
+## How to run — stage 4 (eyes + calibration + hover)
+
+Stage 4 gives ARM-ANI eyes and a pixel→robot map, and proves them by hovering
+**10 cm above** a named object. **It stops at hover** — no descent, no gripper, no
+pick. That is stage 5, and `smoke_10` fails if anything commands a descent.
+
+Vision is deliberately **not** wired into the voice agent yet; the trust gates in
+stage 6 are what get to drive it.
+
+```bash
+# 0. Pure-logic tests (IK, homography, point parsing, workspace check). No hardware.
+python -m pytest tests/ -q
+
+# 1. Does Gemini point at the right thing?  Camera + network, NO MOTION.
+python tests/smoke_09_vision.py --object "red block"
+#    -> writes tests/out/detect.jpg. OPEN IT. Is the marker on the object?
+
+# 2. Map the camera to the table.  OPERATOR REQUIRED.
+python scripts/calibrate_camera.py --print-board      # print at 100% scale, then MEASURE a square
+python scripts/calibrate_camera.py --method charuco   # board flat on the table, one capture
+python scripts/calibrate_camera.py --method tip       # fallback: no ruler needed, uses the arm
+
+# 3. The stage deliverable.  OPERATOR MUST WATCH THE ARM.
+python tests/smoke_10_hover.py --dry-run
+python tests/smoke_10_hover.py --object "red block"
+```
+
+**Measure the table height first.** `ARMANI_TABLE_HEIGHT_M` is the height of the
+table *surface* in robot-base coordinates: `0.0` when the arm's base sits on the same
+surface as the objects, **negative** when the arm is on a riser. It decides whether the
+hover is reachable at all — see the reach table in `docs/env_report.md`.
+
+**Calibration is a physical promise.** The homography is valid only for the tripod
+position, table position and frame size it was measured at. Bump any of them and every
+coordinate the arm computes from vision is wrong — and it will reach confidently to the
+wrong place. Re-run the calibration (~5 min). `armani/data/homography.json` records the
+frame size and reprojection error so this is auditable after the fact.
+
+**A bad map is worse than no map.** `calibrate.save()` reprojects every calibration
+point and **refuses to write** above `ARMANI_CALIB_MAX_REPROJ_PX` (default 15 px mean).
+An uncalibrated system has an empty table polygon, and the workspace check
+(safety rule 3) then refuses every reach — it fails closed, not open.
+
+**The confidence number is honest.** Gemini's pointing API returns no calibrated
+confidence, so `eyes.locate()` builds one from what can actually be observed: how many
+independently-worded queries saw the object, how closely they agreed on *where* it is,
+and the model's own self-report (capped at half the score). `grasp.combined_confidence()`
+then folds in how comfortably the arm can reach it. Nothing here is a calibrated
+probability, and it is not presented as one.
+
+**Approach lean.** Inside the policy envelope the SO-101 cannot point straight down
+10 cm above the table — the best achievable lean is about 35°, so hover constrains
+*position* and reports the lean (`HOVER_MAX_TILT_DEG`). The measured reach map is in
+`docs/env_report.md`; it is the constraint stage 5's grasp has to be designed around.
+
 ### Gestures
 
 Eight macros replayed from one local teleop dataset, one episode each:
@@ -220,14 +275,26 @@ flag can never produce a green summary that touched no hardware.
 
 ```
 armani/
-  config.py    limits, thresholds, ids, models — one place for every constant
-  safety.py    clamp_action, interp_move, SafeMotion, kill switch, require_operator
-  motion.py    connect / read_positions / goto / home   (the only lerobot boundary)
-  logutil.py   JSONL decision log -> logs/decisions.jsonl
-tests/         smoke_01..06, each standalone, each --dry-run capable
-scripts/doctor.py
+  config.py      limits, thresholds, ids, models — one place for every constant
+  safety.py      clamp_action, interp_move, SafeMotion, kill switch, require_operator
+  motion.py      connect / read_positions / goto / home   (the only lerobot boundary)
+  gestures.py    recorded macro replay
+  improvise.py   Claude-authored keyframes, validated and clamped
+  agent.py       realtime voice agent + tool dispatch
+  eyes.py        Gemini pointing + camera capture  (NEVER moves the arm)
+  kinematics.py  FK/IK via placo + the SO-101 URDF  (pure geometry, no motion)
+  calibrate.py   pixel->robot homography, table polygon, workspace check
+  grasp.py       hover_over  (stage 4: hover only — no descent, no gripper)
+  logutil.py     JSONL decision log -> logs/decisions.jsonl
+  data/          home_pose.json, homography.json, so101_kin.urdf
+tests/           smoke_01..10, each standalone, each --dry-run capable
+scripts/         doctor.py, capture_home.py, calibrate_camera.py, run_agent.py
 docs/env_report.md
 ```
+
+**Dependency direction is deliberate:** `eyes` never imports `motion`, `kinematics` or
+`grasp`; `kinematics` never imports `motion`. `grasp` is the only place where seeing and
+moving meet, which is where stage 6 will put the trust gates.
 
 ## Safety notes that are easy to get wrong
 

@@ -255,10 +255,146 @@ MIC_CHANNELS = 1
 MIC_TEST_SECONDS = 2.0
 
 # --- Workspace -----------------------------------------------------------
-# PLACEHOLDER table polygon in robot XY (metres), replaced in stage 4 by the
-# homography calibration. Deliberately left empty: an empty polygon makes
-# gates.py fail closed rather than silently approving an uncalibrated reach.
-TABLE_POLYGON: tuple[tuple[float, float], ...] = ()
+# The table polygon lives in the homography file, because it is a product of the
+# same calibration: it is only meaningful for the camera/table geometry that
+# calibration measured. An empty polygon makes the workspace check fail closed
+# rather than silently approving an uncalibrated reach (safety rule 3).
+HOMOGRAPHY_PATH = DATA_DIR / "homography.json"
+
+# Height of the TABLE SURFACE in robot-base coordinates (metres). Zero means the
+# base sits on the same plane as the table, which is the usual SO-101 mounting.
+# The operator measures this during calibration; a robot on a riser makes it
+# negative, which moves the whole table into an easier part of the envelope
+# (see docs/env_report.md, "top-down reach").
+TABLE_HEIGHT_M = float(os.getenv("ARMANI_TABLE_HEIGHT_M") or 0.0)
+
+# How far above the table the gripper hovers. Stage 4 stops here: nothing in the
+# codebase may command a Z below this until stage 5 adds the descent.
+HOVER_HEIGHT_M = float(os.getenv("ARMANI_HOVER_HEIGHT_M") or 0.10)
+
+
+def hover_z() -> float:
+    """Robot-frame Z of the hover plane. The stage-4 floor for every IK target."""
+    return TABLE_HEIGHT_M + HOVER_HEIGHT_M
+
+
+def _load_table_polygon() -> tuple[tuple[float, float], ...]:
+    """Read the calibrated table polygon out of the homography file.
+
+    Missing or malformed calibration is not an import-time crash — it just
+    leaves the polygon empty, which fails closed at the workspace check.
+    """
+    if not HOMOGRAPHY_PATH.is_file():
+        return ()
+    try:
+        payload = json.loads(HOMOGRAPHY_PATH.read_text())
+        polygon = tuple(
+            (float(x), float(y)) for x, y in payload.get("table_polygon", ())
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"WARNING: ignoring unreadable {HOMOGRAPHY_PATH}: {exc}")
+        return ()
+    if 0 < len(polygon) < 3:
+        print(f"WARNING: {HOMOGRAPHY_PATH} table_polygon has {len(polygon)} points; need 3+. Ignoring.")
+        return ()
+    return polygon
+
+
+TABLE_POLYGON: tuple[tuple[float, float], ...] = _load_table_polygon()
+
+# --- Kinematics (stage 4) -------------------------------------------------
+# Kinematics-only copy of so101_new_calib.urdf from TheRobotStudio/SO-ARM100
+# (Apache-2.0). <visual>/<collision> are stripped because placo refuses to load
+# a URDF whose mesh files are absent, and IK needs only the kinematic chain.
+# Provenance and the exact strip command are in docs/env_report.md.
+URDF_PATH = DATA_DIR / "so101_kin.urdf"
+IK_TARGET_FRAME = "gripper_frame_link"
+
+# The five body joints, in URDF order. The gripper is NOT part of the IK chain.
+IK_JOINTS: tuple[str, ...] = (
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+)
+
+# lerobot's RobotKinematics.inverse_kinematics is ONE soft-QP step, not an
+# iterate-to-convergence solve, and it returns no success flag. We iterate it
+# ourselves and then VERIFY by forward kinematics; these bound that loop.
+IK_MAX_ITERATIONS = 150
+IK_POSITION_TOLERANCE_M = 0.010  # a solution further than this from the ask is a failure
+
+# The placo frame task is SOFT: position and orientation trade against each
+# other, and even a small orientation weight costs centimetres of position
+# (measured: weight 0.05 gives a ~60 mm position error at hover height).
+# solve_top_down walks this ladder and keeps the most vertical solution that
+# still lands inside IK_POSITION_TOLERANCE_M. Descending order; the final 0.0
+# is position-only and always converges when the point is reachable at all.
+IK_ORIENTATION_WEIGHTS: tuple[float, ...] = (0.05, 0.02, 0.008, 0.003, 0.001, 0.0)
+
+# How far the gripper's approach axis may lean off straight-down at hover.
+# Measured fact, not a preference: inside the policy envelope a near-vertical
+# approach only exists at z <= 0.0 m, and at z = +0.10 m the best achievable
+# tilt is about 35 deg. Hover is a staging pose where position is what matters,
+# so we allow the lean and report it. See docs/env_report.md.
+HOVER_MAX_TILT_DEG = 40.0
+
+# --- Eyes (stage 4) -------------------------------------------------------
+# Gemini pointing returns no calibrated confidence. Ours is built from what we
+# can actually observe — see eyes.score_detection for the exact formula.
+EYES_SAMPLES = 2  # independent pointing queries per locate(); 2 = dual-query agreement
+# Agreement between independent queries falls off linearly with how far apart
+# they point: full marks at 0 px, half marks at EYES_AGREEMENT_PX, and zero at
+# twice it. 40 px at 640x480 is roughly the width of a small demo object, so two
+# queries landing on the same object still score well.
+EYES_AGREEMENT_PX = 40.0
+EYES_SELF_REPORT_WEIGHT = 0.5  # rest of the weight goes to inter-sample agreement
+EYES_CONF_THRESHOLD = 0.50  # below this, stage 6 will ask for approval
+EYES_MAX_OUTPUT_TOKENS = 512
+# Google's robotics-ER docs use temperature 1.0 for pointing. Kept at their
+# recommended value rather than forced to 0: the two prompt variants are what
+# make the queries independent, and sampling variance the model genuinely has is
+# something the agreement term should SEE rather than something we should hide.
+EYES_TEMPERATURE = 1.0
+
+# --- Camera calibration (stage 4) ----------------------------------------
+# ChArUco board the operator lays flat on the table. Defaults match the board
+# generated by scripts/calibrate_camera.py --print-board; override if using a
+# pre-printed board and MEASURE the squares with a ruler — a wrong square length
+# scales the entire map linearly.
+CHARUCO_SQUARES_X = _env_int("ARMANI_CHARUCO_SQUARES_X") or 5
+CHARUCO_SQUARES_Y = _env_int("ARMANI_CHARUCO_SQUARES_Y") or 7
+CHARUCO_SQUARE_M = float(os.getenv("ARMANI_CHARUCO_SQUARE_M") or 0.030)
+CHARUCO_MARKER_M = float(os.getenv("ARMANI_CHARUCO_MARKER_M") or 0.022)
+CHARUCO_DICT = os.getenv("ARMANI_CHARUCO_DICT", "DICT_4X4_50")
+
+# findHomography needs 4 correspondences; 6 is the fallback method's ask and
+# gives the reprojection check something to actually detect.
+CALIB_MIN_POINTS = 6
+
+# The table polygon is the convex hull of the calibrated points pulled in by
+# this much (metres). A homography extrapolates confidently and wrongly outside
+# the region it was fitted on, so the arm is only allowed where calibration
+# actually measured, minus a margin.
+TABLE_MARGIN_M = float(os.getenv("ARMANI_TABLE_MARGIN_M") or 0.02)
+
+# A bad map is worse than no map: refuse to save above this mean reprojection
+# error. Measured in pixels, by mapping the calibrated robot points back through
+# the inverse homography and comparing against the pixels they came from.
+CALIB_MAX_REPROJECTION_PX = float(os.getenv("ARMANI_CALIB_MAX_REPROJ_PX") or 15.0)
+
+# --- Object catalog ------------------------------------------------------
+# The five demo objects. `grasp_height_m` is how far above the table surface the
+# gripper should close on that object — DEFINED NOW, USED IN STAGE 5. Stage 4
+# never descends, so these values are not exercised yet.
+OBJECT_CATALOG: dict[str, dict[str, float]] = {
+    "red block": {"grasp_height_m": 0.015},
+    "banana": {"grasp_height_m": 0.015},
+    "marker pen": {"grasp_height_m": 0.010},
+    "blue cup": {"grasp_height_m": 0.040},
+    "toy car": {"grasp_height_m": 0.020},
+}
 
 # --- Gestures ------------------------------------------------------------
 # One local dataset, one episode per gesture, in this exact order. The operator
