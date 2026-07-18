@@ -48,7 +48,7 @@ class Check:
 CHECKS: tuple[Check, ...] = (
     Check(
         "pytest",
-        "Pure-logic tests (safety, improvise, IK, homography, vision parsing)",
+        "Pure-logic tests (safety, improvise, IK, homography, vision, zones/pick)",
         False,
         "nothing — pure logic, runs first so a broken clamp never reaches hardware",
         accepts_dry_run=False,
@@ -68,6 +68,12 @@ CHECKS: tuple[Check, ...] = (
         "Hover over a named object (MOTION)",
         True,
         "OPERATOR MUST WATCH THE ARM; needs a saved homography and a verified home",
+    ),
+    Check(
+        "smoke_11_pick.py",
+        "Taught-zone pick decision path",
+        False,
+        "nothing in dry-run — the live pick needs zones, macros and the operator (--live)",
     ),
 )
 

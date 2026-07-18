@@ -116,6 +116,12 @@ class DryRunArm:
     def label(self) -> str:
         return "DRY-RUN arm (no hardware)"
 
+    @property
+    def sends(self) -> int:
+        """How many actions have been commanded. Zero is how a test proves that
+        a code path which must not move the arm did not move the arm."""
+        return self._sends
+
     def read_positions(self) -> Action:
         return dict(self._pose)
 

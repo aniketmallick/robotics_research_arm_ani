@@ -404,23 +404,24 @@ GESTURE_DATASET_REPO_ID = os.getenv("ARMANI_GESTURE_REPO_ID", "anikmall/armani_g
 _LEROBOT_HOME = Path(
     os.getenv("HF_LEROBOT_HOME", Path.home() / ".cache" / "huggingface" / "lerobot")
 )
-def _resolve_gesture_root() -> Path:
-    """Where the recorded dataset actually landed.
+def _resolve_dataset_root(repo_id: str, env_var: str) -> Path:
+    """Where a recorded dataset actually landed.
 
     lerobot-record calls DatasetConfig.stamp_repo_id() at creation, which appends
     _YYYYMMDD_HHMMSS to the repo id — so `--dataset.repo_id=x/armani_gestures`
-    really writes `x/armani_gestures_20260718_193045`. The runbook pins
+    really writes `x/armani_gestures_20260718_193045`. The runbooks pin
     --dataset.root to avoid that, but if the operator omits it we would otherwise
     look in a directory that never gets created and SKIP forever with no clue why.
     So: exact path if it exists, else the newest timestamped sibling.
 
     Only `root` matters to LeRobotDataset; repo_id is just a label (verified).
+    Shared by the gesture and pick datasets — the trap is identical for both.
     """
-    explicit = os.getenv("ARMANI_GESTURE_ROOT")
+    explicit = os.getenv(env_var)
     if explicit:
         return Path(explicit)
 
-    exact = _LEROBOT_HOME / GESTURE_DATASET_REPO_ID
+    exact = _LEROBOT_HOME / repo_id
     if (exact / "meta" / "info.json").is_file():
         return exact
 
@@ -432,7 +433,7 @@ def _resolve_gesture_root() -> Path:
     return stamped[-1] if stamped else exact
 
 
-GESTURE_DATASET_ROOT = _resolve_gesture_root()
+GESTURE_DATASET_ROOT = _resolve_dataset_root(GESTURE_DATASET_REPO_ID, "ARMANI_GESTURE_ROOT")
 
 GESTURES: dict[str, int] = {
     "bow": 0,
@@ -447,6 +448,41 @@ GESTURES: dict[str, int] = {
 GESTURE_RECORD_FPS = 30
 GESTURE_EPISODE_TIME_S = 10
 GESTURE_PREPOSITION_S = 2.0  # slow move onto the episode's first frame
+
+# --- Taught zones (stage 5, the ratified demo pick path) -----------------
+# Fixed marked spots on the table. Each zone has a PIXEL location (where it
+# appears in the C920 frame) and a recorded pick macro. There are deliberately
+# NO robot-frame coordinates here: the operator demonstrates a working grasp at
+# each spot, which sidesteps homography error, IK verticality and camera-bump
+# sensitivity in one move. Vision only has to decide WHICH spot, which is a
+# coarse call that tolerates large error.
+ZONES_PATH = DATA_DIR / "zones.json"
+
+# One pick macro per zone, episode order == zone order, recorded by the operator
+# with the same lerobot-record flow as the gestures. See docs/recording_picks.md.
+PICK_DATASET_REPO_ID = os.getenv("ARMANI_PICK_REPO_ID", "anikmall/armani_picks")
+PICK_DATASET_ROOT = _resolve_dataset_root(PICK_DATASET_REPO_ID, "ARMANI_PICK_ROOT")
+PICK_EPISODE_TIME_S = 30  # a pick is slower than a gesture: approach, grasp, lift
+
+# An object further than this from EVERY zone centre is not at a marked spot at
+# all — it is on the floor, in someone's hand, or the camera moved. Refusing is
+# the honest answer; picking the nearest zone anyway would send the arm to grab
+# a spot the object is not on. Generous, because zone assignment is meant to be
+# coarse: this is roughly "not even in the neighbourhood".
+ZONE_MAX_DISTANCE_PX = float(os.getenv("ARMANI_ZONE_MAX_DISTANCE_PX") or 140.0)
+
+# How much closer the nearest zone must be than the runner-up before we treat
+# the assignment as settled. Inside this margin the object sits between two
+# spots and the answer is genuinely ambiguous — stage 6's G2 gate asks "which
+# one?" rather than guessing. Exposed here, never silently resolved.
+ASSIGNMENT_MARGIN_PX = float(os.getenv("ARMANI_ASSIGNMENT_MARGIN_PX") or 60.0)
+
+# Post-pick "am I holding anything?" heuristic. The gripper is 0-100 percent
+# with 0 = fully closed, so jaws that closed on NOTHING read near zero, while
+# jaws stopped by an object rest at some intermediate value. This is a weak
+# secondary signal, NOT the verification — it needs calibrating against the
+# actual recorded close target, and the real check is the stage-6 VLM call.
+GRIPPER_EMPTY_MAX_PERCENT = float(os.getenv("ARMANI_GRIPPER_EMPTY_MAX_PCT") or 5.0)
 
 # --- Improvise (safety rule 8) -------------------------------------------
 IMPROVISE_MAX_KEYFRAMES = 8

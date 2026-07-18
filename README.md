@@ -176,6 +176,64 @@ probability, and it is not presented as one.
 *position* and reports the lean (`HOVER_MAX_TILT_DEG`). The measured reach map is in
 `docs/env_report.md`; it is the constraint stage 5's grasp has to be designed around.
 
+## How to run — stage 5 (taught-zone pick) ⭐ the demo pick path
+
+The architect ratified **taught zones** after stage 4's calibration proved too
+fragile. Instead of computing where an object is and solving IK to reach it, the
+operator teleop-records a **working pick at each marked spot**, and the arm
+replays it. Vision's job shrinks to *identity* — "which spot holds the banana?" —
+a coarse call that tolerates being tens of pixels wrong.
+
+That erases the coordinate-precision, IK-verticality, riser and camera-bump
+problems in one move. Every trust gate still applies, because gates are about
+judgment, not millimetres.
+
+Stage 4's `eyes.py` / `calibrate.py` / `kinematics.py` / `grasp.py` hover path
+stays in the repo as a **stretch goal** and is not built on here.
+
+```bash
+# 0. Decision-path checks. No camera, no network, no motion.
+python tests/smoke_11_pick.py --dry-run
+
+# 1. Define the zones: click each marked spot once, label it. ~2 minutes.
+python scripts/define_zones.py
+
+# 2. Record one pick macro per zone, IN THE ORDER define_zones.py printed.
+#    See docs/recording_picks.md for the full runbook.
+
+# 3. Identity without risk: real Gemini call, simulated arm, asserts no motion.
+python tests/smoke_11_pick.py --frame tests/out/frame.jpg --object banana
+
+# 4. The real pick. OPERATOR MUST WATCH THE ARM.
+python tests/smoke_11_pick.py --live --object banana
+
+# 5. The competence bar: does Gemini put each object on the right spot?
+python tests/smoke_11_pick.py --identity 10
+```
+
+**Zone labels name the SPOT, not the object** ("front-left", not "banana").
+Which object is on which spot is decided live on every frame, so objects can be
+swapped between spots at demo time and nothing needs redoing.
+
+**Zone order is the contract.** Zone 1's pick macro is episode 0, zone 2's is
+episode 1. Record them in the order `define_zones.py` prints, or the arm picks
+from the wrong spot with complete confidence.
+
+**Picks never auto-home.** `motion.home()` commands *every* joint including the
+gripper, so homing after a successful grasp would open the jaws and drop the
+object. `pick.play_pick` passes `return_home=False`; the macro is recorded to end
+near home while still holding.
+
+**Refusals are the feature.** `pick_object()` returns a falsy `PickResult`
+**without moving** when the object is unseen, sits between two spots, is not on
+any spot, or that zone has no recorded macro. Those four fields are exactly what
+stage 6's trust gates read — which is why `PickResult` carries them as fields
+rather than one error string.
+
+**Identity accuracy is the number that matters** on this path, not a millimetre
+figure — the grasp itself is a human recording. `--identity` writes the tally and
+the confusions to `logs/decisions.jsonl`.
+
 ### Gestures
 
 Eight macros replayed from one local teleop dataset, one episode each:
@@ -282,15 +340,22 @@ armani/
   improvise.py   Claude-authored keyframes, validated and clamped
   agent.py       realtime voice agent + tool dispatch
   eyes.py        Gemini pointing + camera capture  (NEVER moves the arm)
-  kinematics.py  FK/IK via placo + the SO-101 URDF  (pure geometry, no motion)
-  calibrate.py   pixel->robot homography, table polygon, workspace check
-  grasp.py       hover_over  (stage 4: hover only — no descent, no gripper)
+  zones.py       taught-zone registry, pixel space only  (demo pick path)
+  pick.py        pick_object: identity -> zone -> replay the recorded macro
+  kinematics.py  FK/IK via placo + the SO-101 URDF   [stage-4 stretch]
+  calibrate.py   pixel->robot homography, table polygon  [stage-4 stretch]
+  grasp.py       hover_over, no descent                  [stage-4 stretch]
   logutil.py     JSONL decision log -> logs/decisions.jsonl
-  data/          home_pose.json, homography.json, so101_kin.urdf
-tests/           smoke_01..10, each standalone, each --dry-run capable
-scripts/         doctor.py, capture_home.py, calibrate_camera.py, run_agent.py
-docs/env_report.md
+  data/          home_pose.json, zones.json, homography.json, so101_kin.urdf
+tests/           smoke_01..11, each standalone, each --dry-run capable
+scripts/         doctor.py, capture_home.py, define_zones.py,
+                 calibrate_camera.py, run_agent.py
+docs/            env_report.md, recording_gestures.md, recording_picks.md
 ```
+
+**Demo path vs stretch.** The taught-zone path (`zones.py` + `pick.py` +
+recorded macros) is what the demo runs on. The stage-4 homography/IK/hover path
+is kept, still tested, and not built on — see CLAUDE.md, Grasp.
 
 **Dependency direction is deliberate:** `eyes` never imports `motion`, `kinematics` or
 `grasp`; `kinematics` never imports `motion`. `grasp` is the only place where seeing and
