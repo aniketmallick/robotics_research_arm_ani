@@ -68,12 +68,17 @@ class RealArm:
         return from_feature_keys(self._robot.get_observation())  # type: ignore[attr-defined]
 
     def send(self, action: Action) -> Action:
-        # Clamp here, at the last line before the motors, so safety rule 2 holds
-        # structurally: there is no code path that can send an unclamped value,
-        # regardless of what the caller computed.
+        # Hard backstop at the last line before the motors, so safety rule 2
+        # holds structurally: no code path can send a value outside what the
+        # hardware can physically do. This clamps to PHYSICAL, not policy —
+        # policy belongs on targets, and applying it here would forbid the arm
+        # from ever leaving a legal-but-conservative-envelope-violating pose.
+        # It should never actually change anything; clamp_action logs an ERROR
+        # if it does.
         # send_action returns what lerobot ACTUALLY sent after applying
         # max_relative_target, which can differ from what we asked for.
-        sent = self._robot.send_action(to_feature_keys(safety.clamp_action(action)))  # type: ignore[attr-defined]
+        safe = safety.clamp_action(action, profile="physical")
+        sent = self._robot.send_action(to_feature_keys(safe))  # type: ignore[attr-defined]
         return from_feature_keys(sent)
 
     def disconnect(self) -> None:
@@ -100,7 +105,7 @@ class DryRunArm:
 
     def send(self, action: Action) -> Action:
         # Same clamp as RealArm.send, so dry-run exercises the real guard.
-        action = safety.clamp_action(action)
+        action = safety.clamp_action(action, profile="physical")
         self._pose = {**self._pose, **action}
         self._sends += 1
         # One line per send is unreadable at 25 Hz; sample it.
@@ -294,19 +299,27 @@ def goto(
     target: Action,
     duration: float,
     ignore_stop: bool = False,
+    profile: str = config.DEFAULT_PROFILE,
 ) -> Action:
     """Clamp, interpolate and stream ``target`` to the arm.
+
+    ``profile`` picks the envelope the TARGET is clamped against: "policy" for
+    LLM/IK-derived targets, "recorded" for replayed or measured ones (see
+    config.LIMIT_PROFILES).
 
     Returns the last action actually sent. If the kill switch fires mid-move,
     the arm stops where it is and is walked home before returning.
     """
     current = arm.read_positions()
-    steps = list(safety.interp_move(current, target, duration, hz=config.CONTROL_HZ))
+    steps = list(
+        safety.interp_move(current, target, duration, hz=config.CONTROL_HZ, profile=profile)
+    )
     period = 1.0 / config.CONTROL_HZ
 
     log_event(
         "goto",
         target={k: round(v, 2) for k, v in target.items()},
+        profile=profile,
         steps=len(steps),
         seconds=round(len(steps) * period, 2),
     )
@@ -331,7 +344,16 @@ def goto(
 
 
 def home(arm: Arm, slow: bool = True, ignore_stop: bool = False) -> Action:
-    """Move to the placeholder home pose. Slow by default and on error paths."""
+    """Move to the placeholder home pose. Slow by default and on error paths.
+
+    Uses the "recorded" profile: this is the kill-switch and error-recovery
+    path, so it must work from any physically legal pose. Clamping HOME_POSE
+    against the conservative policy envelope would be pointless anyway (it sits
+    well inside it) but would leave the recovery path hostage to a future
+    tightening of that envelope.
+    """
     duration = config.HOME_DURATION_S if slow else config.HOME_DURATION_S / 2
     log.info("homing over %.1fs", duration)
-    return goto(arm, dict(config.HOME_POSE), duration, ignore_stop=ignore_stop)
+    return goto(
+        arm, dict(config.HOME_POSE), duration, ignore_stop=ignore_stop, profile="recorded"
+    )

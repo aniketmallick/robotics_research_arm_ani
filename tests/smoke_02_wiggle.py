@@ -31,6 +31,8 @@ from armani.logutil import log_event
 WIGGLE_DEGREES = 5.0
 LEG_SECONDS = 2.0
 DEFAULT_JOINT = "wrist_roll"
+# Wiggle targets come from the measured pose, so they use the recorded profile.
+WIGGLE_PROFILE = "recorded"
 
 
 def parse() -> argparse.Namespace:
@@ -113,7 +115,10 @@ def _wiggle(arm: motion.Arm, joint: str, start: dict[str, float]) -> None:
     if joint not in start:
         raise RuntimeError(f"arm did not report a position for {joint!r}")
 
-    limit_low, limit_high = config.JOINT_LIMITS[joint]
+    # Both legs are derived from the MEASURED pose, not from an LLM or IK, so
+    # they are clamped against the "recorded" profile — the policy envelope
+    # would clip a legitimately parked joint by tens of degrees.
+    limit_low, limit_high = config.LIMIT_PROFILES[WIGGLE_PROFILE][joint]
 
     def fits(value: float) -> bool:
         return limit_low <= value <= limit_high
@@ -135,10 +140,10 @@ def _wiggle(arm: motion.Arm, joint: str, start: dict[str, float]) -> None:
     out_target = {joint: target_value}
 
     print(f"  -> {joint} to {out_target[joint]:+.1f} over {LEG_SECONDS:.0f}s")
-    motion.goto(arm, out_target, duration=LEG_SECONDS)
+    motion.goto(arm, out_target, duration=LEG_SECONDS, profile=WIGGLE_PROFILE)
 
     print(f"  -> {joint} back to {start[joint]:+.1f} over {LEG_SECONDS:.0f}s")
-    motion.goto(arm, {joint: start[joint]}, duration=LEG_SECONDS)
+    motion.goto(arm, {joint: start[joint]}, duration=LEG_SECONDS, profile=WIGGLE_PROFILE)
 
     log_event("smoke_02", joint=joint, degrees=WIGGLE_DEGREES, returned_to=round(start[joint], 2))
 

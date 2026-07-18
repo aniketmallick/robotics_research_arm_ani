@@ -69,6 +69,7 @@ Every test is standalone and every one accepts `--dry-run`.
 
 | Test | What it proves | Needs |
 |---|---|---|
+| `tests/test_safety.py` | clamp/interpolate/envelope logic is correct | nothing (pure logic) |
 | `tests/smoke_01_ports.py` | follower connects, reports all 6 joints (commands no motion) | arm plugged in, **operator confirms** |
 | `tests/smoke_02_wiggle.py` | one joint moves ±5° and returns (**MOTION**) | **operator watching the arm** |
 | `tests/smoke_03_camera.py` | a 640x480 frame from the C920 | C920 on its tripod |
@@ -93,13 +94,28 @@ and both refuse if stdin is not a terminal.
 Smoke 01 asks too, because **connecting is not passive**: lerobot's `connect()` calls
 `configure()`, which re-enables torque. The arm goes stiff the moment it connects.
 
-### If the arm refuses to move
+### Joint limits: three profiles, not one
 
-`interp_move()` raises `OutsideEnvelopeError` when a joint is physically resting outside
-`config.JOINT_LIMITS`. That is deliberate: from out there, every legal target is far away,
-so any command would be the large jump safety rule 2 forbids. Power down the servos, move
-the arm back toward the middle of its range by hand, and re-run. Smoke 01 warns about this
-before smoke 02 hits it.
+A single envelope cannot answer both "where may the arm *be*" and "where may it be
+*commanded to go*". The parked arm rests at `shoulder_lift = -111.7°`, far outside the
+conservative envelope — and treating that as illegal made `home()` refuse, which silently
+broke the kill switch. So targets are clamped against a profile chosen by their origin:
+
+| profile | applies to | envelope |
+|---|---|---|
+| `policy` | LLM- and IK-derived targets | ±90° base, ±60° others |
+| `recorded` | gesture replay, return-to-entry recovery, `home()` | physical − 2° |
+| `physical` | the send boundary only — hard backstop | full calibrated range |
+
+`interp_move()` starts from the **measured** pose and lerps to an already-clamped target, so
+every step lies between them: the arm only ever moves *toward* legality, never further out.
+
+`OutsideEnvelopeError` now means only one thing — a joint read **beyond its physical range**
+by more than 2°, i.e. an encoder or calibration fault. A parked pose outside the policy
+envelope is normal and is not blocked.
+
+`tests/test_safety.py` locks this in using the arm's real measured rest pose. Run it alone
+with `python tests/test_safety.py` — no hardware, no operator.
 
 **Kill switch:** Ctrl-C during a move stops the arm and walks it back under control.
 A second Ctrl-C aborts immediately. ESC works too if Input Monitoring is granted.

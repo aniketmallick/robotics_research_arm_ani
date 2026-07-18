@@ -107,6 +107,42 @@ PHYSICAL_LIMITS: dict[str, tuple[float, float]] = {
     "gripper": (0.0, 100.0),
 }
 
+# How far BEYOND a physical limit a measured position may read before we treat
+# it as an encoder/calibration fault and refuse to move. Reads at a mechanical
+# stop legitimately overshoot the calibrated range: on 2026-07-18 the parked arm
+# read shoulder_lift = -111.69 against a calibrated -111.0, because lerobot's
+# DEGREES conversion does not clamp reads to the calibration range.
+PHYSICAL_TOLERANCE = 2.0
+
+# Margin pulled in from the physical limit for the "recorded" profile.
+RECORDED_MARGIN = 2.0
+
+
+def _shrink(limits: dict[str, tuple[float, float]], margin: float) -> dict[str, tuple[float, float]]:
+    """Pull every limit in by `margin`. The gripper is a percentage, not an
+    angle, and needs its full 0-100 travel to open and close, so it is left alone."""
+    return {
+        joint: (lo, hi) if joint == GRIPPER_JOINT else (lo + margin, hi - margin)
+        for joint, (lo, hi) in limits.items()
+    }
+
+
+# Targets are clamped against one of these, chosen by where the target came from:
+#
+#   policy    LLM- and IK-originated targets. Deliberately conservative.
+#   recorded  Gesture replay and return-to-entry recovery. These targets are
+#             MEASURED reality, so the conservative policy envelope must not
+#             clip them — an entry pose the arm was actually in is by definition
+#             reachable, and clipping it would move the arm somewhere it never was.
+#   physical  Hard backstop applied at the send boundary only. Protects the
+#             servos; nothing should ever reach it.
+LIMIT_PROFILES: dict[str, dict[str, tuple[float, float]]] = {
+    "policy": JOINT_LIMITS,
+    "recorded": _shrink(PHYSICAL_LIMITS, RECORDED_MARGIN),
+    "physical": PHYSICAL_LIMITS,
+}
+DEFAULT_PROFILE = "policy"
+
 
 def _assert_limits_within_physical() -> None:
     """Fail loudly at import if a policy limit exceeds the calibrated range."""
@@ -125,10 +161,6 @@ _assert_limits_within_physical()
 CONTROL_HZ = 25  # interpolation rate; CLAUDE.md requires 20-30 Hz
 MAX_JOINT_SPEED = 45.0  # deg/s for body joints, percent/s for the gripper
 HOME_DURATION_S = 3.0  # deliberately slow; used by home(slow=True)
-
-# How far outside a joint limit a MEASURED position may sit before we refuse to
-# move at all. Covers encoder noise, not a genuinely out-of-envelope arm.
-ENVELOPE_TOLERANCE = 1.0
 
 # Defence in depth: lerobot's own per-step cap (config.max_relative_target),
 # in the same units as the action. Derived from the interpolator's own per-step

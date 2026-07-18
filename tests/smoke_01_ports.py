@@ -73,23 +73,31 @@ def main() -> int:
             return fail(f"follower did not report joint(s): {missing}")
         log_event("smoke_01", positions={k: round(v, 2) for k, v in last.items()})
 
-        # Warn here rather than letting smoke_02 discover it: interp_move
-        # refuses to move an arm that is resting outside its policy limits.
-        outside = [
-            f"{j}={last[j]:.1f} (limit {config.JOINT_LIMITS[j][0]:g}..{config.JOINT_LIMITS[j][1]:g})"
+        # A pose outside the conservative POLICY envelope is normal — the arm
+        # parks against its stops — and no longer blocks motion. Report it, do
+        # not fail on it.
+        outside_policy = [
+            f"{j}={last[j]:.1f} (policy {config.JOINT_LIMITS[j][0]:g}..{config.JOINT_LIMITS[j][1]:g})"
             for j in joints
             if not config.JOINT_LIMITS[j][0] <= last[j] <= config.JOINT_LIMITS[j][1]
         ]
-        if outside:
+        if outside_policy:
             print(
-                "\nWARNING: these joints rest OUTSIDE config.JOINT_LIMITS:\n  "
-                + "\n  ".join(outside)
-                + "\n  smoke_02 will refuse to move them. Move the arm back by hand, or ask\n"
-                  "  the architect to widen the limit deliberately."
+                "\nNote: these joints rest outside the conservative policy envelope:\n  "
+                + "\n  ".join(outside_policy)
+                + "\n  That is expected for a parked arm. Motion out of it is allowed and\n"
+                  "  interpolated; only LLM/IK targets are held to the policy envelope."
             )
-            return skip(f"{len(outside)} joint(s) outside the policy envelope")
 
-        return ok(f"follower responded on all {len(joints)} joints, all inside limits")
+        # This is the condition that genuinely blocks motion: a reading the
+        # hardware cannot produce, i.e. an encoder or calibration fault.
+        try:
+            safety.check_start_pose(last, joints)
+        except safety.OutsideEnvelopeError as exc:
+            print(f"\n{exc}")
+            return fail("joint reading beyond the physical range — calibration or encoder fault")
+
+        return ok(f"follower responded on all {len(joints)} joints, all physically plausible")
     except Exception as exc:
         return fail(f"error while reading positions: {type(exc).__name__}: {exc}")
     finally:

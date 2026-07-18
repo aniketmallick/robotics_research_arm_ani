@@ -41,9 +41,17 @@ class Check:
     title: str
     needs_hardware: bool
     note: str
+    accepts_dry_run: bool = True
 
 
 CHECKS: tuple[Check, ...] = (
+    Check(
+        "test_safety.py",
+        "Safety core regression tests",
+        False,
+        "nothing — pure logic, runs first so a broken clamp never reaches hardware",
+        accepts_dry_run=False,
+    ),
     Check("smoke_01_ports.py", "Serial ports + follower connection", True, "arm plugged in, USB data cable"),
     Check("smoke_02_wiggle.py", "5 degree wiggle (MOTION)", True, "OPERATOR MUST WATCH THE ARM"),
     Check("smoke_03_camera.py", "Camera frame @640x480", True, "C920 on its tripod"),
@@ -60,7 +68,7 @@ def run(check: Check, dry_run: bool) -> int:
     print("=" * 72)
 
     command = [sys.executable, str(TESTS_DIR / check.script)]
-    if dry_run:
+    if dry_run and check.accepts_dry_run:
         command.append("--dry-run")
     # The child writes straight to fd 1. Without this flush our buffered header
     # lands after the child's output whenever doctor's output is piped to a file.

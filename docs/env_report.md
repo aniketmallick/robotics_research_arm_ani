@@ -81,6 +81,28 @@ Also worth knowing: in DEGREES mode `MotorsBus._unnormalize()` does **not** clam
 Every policy limit is strictly inside its physical limit, so policy binds first.
 `config._assert_limits_within_physical()` enforces this at import time.
 
+### Measured rest pose (2026-07-18) — and why one envelope was not enough
+
+The parked follower reported:
+
+| joint | at rest | inside policy? |
+|---|---|---|
+| shoulder_pan | 3.78° | yes |
+| shoulder_lift | **−111.69°** | no (±60) |
+| elbow_flex | **+96.79°** | no (±60) |
+| wrist_flex | **+68.92°** | no (±60) |
+| wrist_roll | 1.36° | yes |
+| gripper | 31.12 % | yes |
+
+Note `shoulder_lift` reads **past** its calibrated −111.0: lerobot's DEGREES branch in
+`_normalize()` uses the raw tick value, not the range-bounded one, so reads at a mechanical
+stop legitimately overshoot. Hence `PHYSICAL_TOLERANCE = 2.0`.
+
+This pose broke the original single-envelope design: `home()` targets all six joints, three
+were "outside limits", so it refused — taking the kill switch and every error-recovery path
+with it. Fixed by splitting into the `policy` / `recorded` / `physical` profiles described in
+the README, locked in by `tests/test_safety.py`.
+
 ## Serial ports
 
 `ls /dev/tty.usbmodem*` → **no matches at the time of writing. Both arms are unplugged.**

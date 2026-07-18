@@ -23,6 +23,9 @@ if not _console.handlers:
     _handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
     _console.addHandler(_handler)
     _console.setLevel(logging.INFO)
+    # lerobot configures a root handler, so without this every armani line is
+    # printed twice — once by us and once by the root logger.
+    _console.propagate = False
 
 
 def get_logger(name: str) -> logging.Logger:

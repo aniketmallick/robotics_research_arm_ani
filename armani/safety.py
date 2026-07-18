@@ -12,7 +12,7 @@ import math
 import signal
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from types import FrameType
 from typing import Protocol
@@ -29,11 +29,17 @@ _stop_requested = threading.Event()
 
 
 class OutsideEnvelopeError(RuntimeError):
-    """The arm is physically resting outside its policy limits.
+    """The arm reads outside its PHYSICAL range by more than the tolerance.
 
-    Raised instead of moving, because every legal target is then far away and
-    any command would be a large jump. A human has to walk the arm back into
-    the envelope (or the limit has to be widened deliberately) first.
+    This is an encoder or calibration fault, not a parking position: the joint
+    claims to be somewhere the hardware cannot go. Refusing to move is the only
+    safe response, because every commanded target would be computed from a
+    position we cannot trust.
+
+    Note what this is NOT: an arm parked outside the conservative *policy*
+    envelope is a perfectly legal starting point. Its rest pose is measured
+    reality, and motion out of it must stay possible — otherwise home() and the
+    kill switch stop working exactly when they are needed.
     """
 
 
@@ -47,31 +53,68 @@ class Homeable(Protocol):
 # --- Clamping ------------------------------------------------------------
 
 
-def clamp_action(action: Action) -> Action:
-    """Return a NEW action with every joint clamped to its configured limit.
+def clamp_action(action: Action, profile: str = config.DEFAULT_PROFILE) -> Action:
+    """Return a NEW action with every joint clamped to the given limit profile.
+
+    ``profile`` selects which envelope applies — see config.LIMIT_PROFILES:
+    "policy" for LLM/IK targets, "recorded" for replayed or measured targets,
+    "physical" for the send-boundary backstop.
 
     Raises on unknown joints and on non-finite values. NaN is rejected
     explicitly because ``min(hi, max(lo, nan))`` evaluates to ``nan`` — every
     comparison against NaN is False, so a naive clamp would hand NaN straight
     to the motors.
     """
+    try:
+        limits = config.LIMIT_PROFILES[profile]
+    except KeyError:
+        raise ValueError(
+            f"unknown limit profile {profile!r}; expected one of {sorted(config.LIMIT_PROFILES)}"
+        ) from None
+
     clamped: Action = {}
     for joint, value in action.items():
-        if joint not in config.JOINT_LIMITS:
-            raise ValueError(f"unknown joint {joint!r}; expected one of {sorted(config.JOINT_LIMITS)}")
+        if joint not in limits:
+            raise ValueError(f"unknown joint {joint!r}; expected one of {sorted(limits)}")
         try:
             numeric = float(value)
         except (TypeError, ValueError):
             raise ValueError(f"joint {joint!r} got non-numeric value {value!r}") from None
         if not math.isfinite(numeric):
             raise ValueError(f"joint {joint!r} got non-finite value {numeric!r}")
-        low, high = config.JOINT_LIMITS[joint]
+        low, high = limits[joint]
         result = min(high, max(low, numeric))
         if result != numeric:
-            log.warning("clamped %s: %.2f -> %.2f", joint, numeric, result)
-            log_event("clamp", joint=joint, requested=numeric, applied=result)
+            # At the "physical" profile this must never fire: the interpolator
+            # lerps between a measured start and an already-clamped target, so
+            # every step is inside the physical range by construction.
+            level = log.error if profile == "physical" else log.warning
+            level("clamped %s (%s): %.2f -> %.2f", joint, profile, numeric, result)
+            log_event("clamp", joint=joint, profile=profile, requested=numeric, applied=result)
         clamped[joint] = result
     return clamped
+
+
+def check_start_pose(current: Action, joints: Iterable[str]) -> None:
+    """Refuse to move when a measured joint reads beyond its PHYSICAL range.
+
+    Checked against the physical limits, not the policy envelope: a parked arm
+    outside the policy envelope is legal and must still be movable.
+    """
+    faults = []
+    for joint in joints:
+        low, high = config.PHYSICAL_LIMITS[joint]
+        value = current[joint]
+        if not (low - config.PHYSICAL_TOLERANCE <= value <= high + config.PHYSICAL_TOLERANCE):
+            faults.append(f"{joint}={value:.1f} (physical {low:g}..{high:g})")
+    if faults:
+        raise OutsideEnvelopeError(
+            "joint(s) read beyond the physical range by more than "
+            f"{config.PHYSICAL_TOLERANCE:g} degrees: " + "; ".join(faults) + ". "
+            "This is an encoder or calibration fault, not a parking position — "
+            "the arm claims to be somewhere the hardware cannot reach. Refusing to move. "
+            "Power-cycle the servos and re-run smoke_01; if it persists the calibration is wrong."
+        )
 
 
 # --- Interpolation -------------------------------------------------------
@@ -82,6 +125,7 @@ def interp_move(
     target: Action,
     duration: float,
     hz: int = config.CONTROL_HZ,
+    profile: str = config.DEFAULT_PROFILE,
 ) -> Iterator[Action]:
     """Yield clamped intermediate actions from ``current`` to ``target``.
 
@@ -98,7 +142,7 @@ def interp_move(
     if duration < 0:
         raise ValueError(f"duration must be non-negative, got {duration}")
 
-    safe_target = clamp_action(target)
+    safe_target = clamp_action(target, profile=profile)
     missing = [j for j in safe_target if j not in current]
     if missing:
         raise ValueError(f"no current position for joint(s) {missing}; cannot interpolate")
@@ -108,23 +152,12 @@ def interp_move(
     # first commanded step would then be a jump of however far the real arm sits
     # outside the limit — exactly the raw jump safety rule 2 forbids.
     start = {j: float(current[j]) for j in safe_target}
-    outside = [
-        f"{j}={start[j]:.1f} (limit {config.JOINT_LIMITS[j][0]:g}..{config.JOINT_LIMITS[j][1]:g})"
-        for j in safe_target
-        if not (
-            config.JOINT_LIMITS[j][0] - config.ENVELOPE_TOLERANCE
-            <= start[j]
-            <= config.JOINT_LIMITS[j][1] + config.ENVELOPE_TOLERANCE
-        )
-    ]
-    if outside:
-        raise OutsideEnvelopeError(
-            "arm is resting outside its policy limits: "
-            + "; ".join(outside)
-            + ". Refusing to move — every legal target is a long way from here. "
-            "Power down the servos and move the arm back by hand, or widen the limit "
-            "in config.JOINT_LIMITS deliberately."
-        )
+
+    # Only a physically impossible reading blocks motion. A pose outside the
+    # policy envelope is legal to start from, and the lerp below walks it back
+    # in monotonically: every step lies between the measured start and an
+    # already-clamped target, so the arm only ever moves toward legality.
+    check_start_pose(start, safe_target)
 
     largest_delta = max((abs(safe_target[j] - start[j]) for j in safe_target), default=0.0)
     if largest_delta == 0.0:
