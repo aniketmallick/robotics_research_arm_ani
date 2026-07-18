@@ -328,8 +328,46 @@ IMPROVISE_MAX_TOKENS = 1024
 CONF_APPROVAL = 0.60
 APPROVAL_TIMEOUT_S = 10
 
+# --- Voice agent (stage 3) ----------------------------------------------
+# Realtime output voice. See RealtimeVoice options in the OpenAI Agents SDK;
+# "ash" is the SDK default. Kept in config so the persona's sound is not buried
+# in code.
+REALTIME_VOICE = os.getenv("ARMANI_REALTIME_VOICE", "ash")
+
+# Push-to-talk: turn detection is OFF (see agent.py); the operator holds this key
+# to stream mic audio and releases to commit + request a response. pynput names
+# the spacebar "space"; kept configurable for a different PTT key if needed.
+PTT_KEY = os.getenv("ARMANI_PTT_KEY", "space")
+
+# Optional sounddevice device overrides. None -> the system default device.
+# Accepts either an integer index or a substring of the device name (sounddevice
+# resolves both). The demo mic is a wired headset, NOT the C920 or AirPods.
+AUDIO_INPUT_DEVICE = os.getenv("ARMANI_AUDIO_INPUT_DEVICE") or None
+AUDIO_OUTPUT_DEVICE = os.getenv("ARMANI_AUDIO_OUTPUT_DEVICE") or None
+
+# The realtime API speaks PCM16 mono at 24 kHz (see the SDK's audio_formats.py,
+# which pins AudioPCM rate=24000). Both capture and playback must match it.
+AUDIO_SAMPLE_RATE = 24_000
+AUDIO_CHANNELS = 1
+# Frames per mic read. ~20 ms at 24 kHz keeps push-to-talk latency low without
+# flooding the socket.
+AUDIO_BLOCKSIZE = 480
+
+# Device names that mean the operator forgot to plug in / select the headset.
+# Printed as a reminder at session start (CLAUDE.md demo-mic note).
+AUDIO_DEVICE_WARN_SUBSTRINGS: tuple[str, ...] = ("AirPods", "MacBook Pro Microphone")
+
+# Keep replies snappy and cheap. Inclusive of tool-call tokens (SDK semantics).
+AGENT_MAX_OUTPUT_TOKENS = _env_int("ARMANI_AGENT_MAX_TOKENS") or 1024
+
+# Estimated durations reported to the model when a long action is enqueued, so
+# it can talk for roughly the right length while the arm moves. Gestures carry
+# their own measured length; this is the fallback for improvised moves.
+AGENT_IMPROVISE_ETA_S = 6.0
+
 # --- Models --------------------------------------------------------------
 REALTIME_MODEL = "gpt-realtime-2.1"
+
 GEMINI_MODELS: tuple[str, ...] = (
     "gemini-robotics-er-1.6-preview",
     "gemini-robotics-er-1.5-preview",

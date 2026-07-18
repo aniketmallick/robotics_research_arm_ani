@@ -61,7 +61,9 @@ CHECKS: tuple[Check, ...] = (
     Check("smoke_05_keys.py", "OpenAI / Gemini / Anthropic keys", False, "network + .env filled in"),
     Check("smoke_06_ptt.py", "Global spacebar (push-to-talk)", False, "Input Monitoring granted"),
     Check("smoke_07_gestures.py", "Recorded gesture macros", True, "gesture dataset recorded; live replay moves the arm"),
+    Check("smoke_08_agent.py", "Realtime voice agent", False, "OPENAI_API_KEY for the text round trip; live session is run separately"),
 )
+
 
 
 def run(check: Check, dry_run: bool) -> int:

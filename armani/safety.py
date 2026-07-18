@@ -27,6 +27,15 @@ Action = dict[str, float]
 # Set by the kill switch. Long motions check it between interpolation steps.
 _stop_requested = threading.Event()
 
+# When set, handle_freeze holds position and returns WITHOUT prompting. Stage 3's
+# motion worker runs on a background thread that must never own the terminal: an
+# LLM-invoked stop (or a human Ctrl-C that arrives while the worker is mid-move)
+# should stop commanding and HOLD, then let the MAIN thread present the freeze
+# menu. This is purely additive — with the flag unset (its default), the human
+# kill switch behaves exactly as before.
+_freeze_suppressed = threading.Event()
+
+
 
 class OutsideEnvelopeError(RuntimeError):
     """The arm reads outside its PHYSICAL range by more than the tolerance.
@@ -96,12 +105,15 @@ def clamp_action(
         low, high = limits[joint]
         result = min(high, max(low, numeric))
         if result != numeric and log_clamps:
-            # At the "physical" profile this must never fire: the interpolator
-            # lerps between a measured start and an already-clamped target, so
-            # every step is inside the physical range by construction.
-            level = log.error if profile == "physical" else log.warning
+            # At the send-boundary profiles ("physical" and "backstop") this must
+            # never fire: the interpolator lerps between a measured start and an
+            # already-clamped target, so every step is inside range by
+            # construction. A clamp there is an anomaly worth an ERROR — it means
+            # a value reached the motors that no earlier profile caught.
+            level = log.error if profile in ("physical", "backstop") else log.warning
             level("clamped %s (%s): %.2f -> %.2f", joint, profile, numeric, result)
             log_event("clamp", joint=joint, profile=profile, requested=numeric, applied=result)
+
         clamped[joint] = result
     return clamped
 
@@ -212,6 +224,28 @@ def clear_stop() -> None:
     _stop_requested.clear()
 
 
+@contextmanager
+def suppress_freeze() -> Iterator[None]:
+    """Within this block, handle_freeze HOLDS and returns without prompting.
+
+    Used by the stage-3 motion worker, which runs off the main thread. A worker
+    that hit the stop flag (LLM stop_motion, or a human Ctrl-C mid-move) must
+    stop commanding and hold, but must NOT call input() from a background
+    thread — the main agent loop owns the terminal and presents the human freeze
+    menu itself. Reentrant-safe for a single worker; nested use is not expected.
+    """
+    _freeze_suppressed.set()
+    try:
+        yield
+    finally:
+        _freeze_suppressed.clear()
+
+
+def freeze_suppressed() -> bool:
+    return _freeze_suppressed.is_set()
+
+
+
 def install_kill_switch(on_stop: object = None) -> None:
     """Register Ctrl-C (and ESC when permitted) as a stop request.
 
@@ -252,10 +286,20 @@ def handle_freeze(arm: Homeable, motion_start: Action) -> None:
     from armani import motion
 
     log_event("freeze", at={k: round(v, 2) for k, v in motion_start.items()})
+
+    # A background motion worker must not call input() from off the main thread.
+    # It has already stopped commanding, so the arm is holding; return and let
+    # the main agent loop present the menu (or, for an LLM stop, just keep going).
+    if freeze_suppressed():
+        log.info("freeze suppressed (background worker) — holding, not prompting")
+        log_event("freeze_choice", choice="hold", reason="freeze suppressed")
+        return
+
     print("\n[kill switch] FROZEN — holding position. Nothing will move until you choose.")
 
     if not sys.stdin.isatty():
         log.warning("not a terminal; holding position and taking no further action")
+
         log_event("freeze_choice", choice="hold", reason="non-interactive")
         return
 

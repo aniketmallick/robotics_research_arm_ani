@@ -1,0 +1,13 @@
+{
+  "pose": {
+    "shoulder_pan": -2.198,
+    "shoulder_lift": -54.549,
+    "elbow_flex": 23.912,
+    "wrist_flex": 37.714,
+    "wrist_roll": -6.813,
+    "gripper": 5.48
+  },
+  "verified": true,
+  "captured_at": "2026-07-18T16:18:13+00:00",
+  "note": "Captured by hand via scripts/capture_home.py with torque released."
+}

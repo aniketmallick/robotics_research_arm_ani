@@ -7,7 +7,9 @@ safety gates that live in Python, not in a prompt.
 See `CLAUDE.md` for the project constitution and `docs/env_report.md` for what is
 actually installed on this machine.
 
-**Status: stage 2 (gestures + verified home + improvise).** No voice or vision yet.
+**Status: stage 3 (realtime voice agent).** ARM-ANI talks, roasts, and moves on
+command via push-to-talk. No vision or trust gates yet (stages 4+).
+
 
 ## Setup
 
@@ -85,6 +87,40 @@ python scripts/improvise_cli.py "do a slow clap" --dry-run
 python scripts/improvise_cli.py "take a proud bow"    # OPERATOR REQUIRED
 ```
 
+## How to run — stage 3 (voice agent)
+
+ARM-ANI is a realtime voice agent (OpenAI Agents SDK, model `gpt-realtime-2.1`)
+that talks back and drives the arm through six tools. Motion runs on a dedicated
+worker thread, so ARM-ANI keeps talking while the arm moves.
+
+```bash
+# Build + one text round trip through the model. No audio, no motion.
+python tests/smoke_08_agent.py --dry-run
+
+# The live voice session. OPERATOR REQUIRED — one presence gate at startup.
+python scripts/run_agent.py            # push-to-talk: HOLD SPACE to speak, release to send
+python scripts/run_agent.py --text     # keyboard only, when audio is impossible
+python scripts/run_agent.py --no-motion  # personality only; motion tools refuse
+```
+
+**Push-to-talk:** turn detection is off — hold the spacebar to stream the mic,
+release to commit and get a reply. Tapping space while ARM-ANI is speaking is a
+**barge-in** (it interrupts and listens). Needs Input Monitoring for the global
+spacebar; use `--text` if that is unavailable.
+
+**Tools** (each validates its args, logs to the decision log, returns compact JSON):
+`list_gestures`, `play_gesture`, `improvise_move`, `go_home`, `get_status`,
+`stop_motion`. `stop_motion` aborts the current move and holds — it does *not* open
+the freeze menu (that belongs to the human kill switch only). Declining the startup
+operator gate drops into NO-MOTION mode: the personality still demos, motion tools
+return `refused`.
+
+**Kill switch during a session:** ESC / Ctrl-C freezes the arm and hands *you* the
+operator menu (return-to-start / home / torque-off / leave); the agent pauses its
+own input while you decide, then resumes. The background motion worker never prompts
+on stdin itself.
+
+
 ### Gestures
 
 Eight macros replayed from one local teleop dataset, one episode each:
@@ -122,11 +158,13 @@ Every test is standalone and every one accepts `--dry-run`.
 | `tests/smoke_05_keys.py` | all three APIs answer | network, `.env` filled in |
 | `tests/smoke_06_ptt.py` | global spacebar hold/release | Input Monitoring granted |
 | `tests/smoke_07_gestures.py` | all 8 gestures load and are playable | recorded dataset |
+| `tests/smoke_08_agent.py` | agent builds, 6 tools register, one text turn answers | `OPENAI_API_KEY` (dry-run) |
 
 ```bash
 python tests/smoke_01_ports.py --dry-run
 python tests/smoke_02_wiggle.py --joint wrist_roll   # default joint; rotates in place
 ```
+
 
 ### Before touching the motors
 
