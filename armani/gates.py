@@ -29,6 +29,7 @@ out, or unverified all mean the arm does not act — and says why.
 
 from __future__ import annotations
 
+import math
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -102,6 +103,11 @@ class GatedResult:
     zone: str | None = None
     zone_label: str | None = None
     clarified: bool = False
+    # G2 asked a question and is waiting for the caller to ask again with a spot.
+    # NOT a refusal: nothing is wrong, we just need to be told which one.
+    needs_clarification: bool = False
+    clarify_question: str = ""
+    clarify_options: tuple[str, ...] = ()
     approval_required: bool = False
     approved: bool | None = None
     timed_out: bool = False
@@ -123,6 +129,9 @@ class GatedResult:
             "zone": self.zone,
             "zone_label": self.zone_label,
             "clarified": self.clarified,
+            "needs_clarification": self.needs_clarification,
+            "clarify_question": self.clarify_question,
+            "clarify_options": list(self.clarify_options),
             "approval_required": self.approval_required,
             "approved": self.approved,
             "timed_out": self.timed_out,
@@ -133,6 +142,8 @@ class GatedResult:
 
     def speak(self) -> str:
         """One line the robot can say. Style is the persona's; facts are ours."""
+        if self.needs_clarification:
+            return self.clarify_question
         if self.ok:
             done = (
                 "and it's in the tray" if config.PICK_MODE == "place" else "and I've got it"
@@ -191,7 +202,8 @@ def run_gated_pick(
     arm,
     object_name: str,
     *,
-    clarify: Clarify,
+    spot: str | None = None,
+    clarify: Clarify | None = None,
     approve: Approve,
     verify_vlm: bool = True,
     perform: Perform | None = None,
@@ -201,10 +213,17 @@ def run_gated_pick(
 ) -> GatedResult:
     """Run the five gates around a taught-zone pick.
 
-    ``clarify(question, options) -> str | None`` and
-    ``approve(prompt, timeout_s) -> bool`` are injected; the console smoke test
-    supplies terminal versions and the agent supplies voice ones. Neither is
-    trusted with the deadline.
+    ``spot`` is a human-named marked spot, relayed by the caller after G2 asked
+    "which one?". It SKIPS the ambiguity branch but is not taken on trust: the
+    words must name a real zone AND the object must be detected there.
+
+    ``clarify(question, options) -> str | None`` is optional. When given (the
+    console smoke test) an ambiguous pick blocks on it. When omitted (the voice
+    agent) an ambiguous pick RETURNS with ``needs_clarification`` set and
+    nothing pending, and the caller asks again with ``spot``.
+
+    ``approve(prompt, timeout_s) -> bool`` is always injected and is never
+    trusted with its own deadline — G4's stand-down is enforced here.
 
     ``perform(zone) -> PerformOutcome`` runs the macro. The default runs it
     inline; the agent passes one that enqueues it on the motion worker.
@@ -261,18 +280,46 @@ def run_gated_pick(
         return stop(G2_AMBIGUOUS, f"I can see the {object_name}, but it isn't on one of my marked spots.",
                     vision_confidence=round(detection.confidence, 3))
 
-    if detection.candidates > 1 or match.ambiguous:
-        resolved = _resolve_ambiguity(
-            object_name, detection, match, zone_set, clarify, records,
-            frame=frame, timeout_s=approval_timeout_s,
+    if spot:
+        # The caller was told WHICH by a human and is asking again. The spot is
+        # relayed text, so it is re-checked here twice over: it has to name a
+        # real zone, AND the object has to actually be detected at that zone.
+        # That second check is what keeps the invariant — a model cannot talk
+        # the arm into grasping at an empty spot by naming it.
+        resolved = _resolve_named_spot(
+            object_name, spot, detection, match, zone_set, records, frame=frame
         )
         if resolved is None:
             return stop(
                 G2_AMBIGUOUS,
-                f"I'm not sure which {object_name} you mean, so I'm not going to guess.",
+                f"I can't see a {object_name} on {spot}.",
                 vision_confidence=round(detection.confidence, 3),
             )
         match, clarified = resolved, True
+
+    elif detection.candidates > 1 or match.ambiguous:
+        options = _clarify_options(object_name, detection, match, zone_set, frame)
+        if clarify is not None:
+            # A blocking clarify was injected (the console smoke test). Nothing
+            # moves while it waits, so this gets the longer, conversational
+            # deadline rather than the safety one.
+            resolved = _resolve_ambiguity(
+                object_name, detection, options, clarify, records,
+                timeout_s=config.CLARIFY_TIMEOUT_S,
+            )
+            if resolved is None:
+                return stop(
+                    G2_AMBIGUOUS,
+                    f"I'm not sure which {object_name} you mean, so I'm not going to guess.",
+                    vision_confidence=round(detection.confidence, 3),
+                )
+            match, clarified = resolved, True
+        else:
+            # STATELESS: ask, and stop. The caller asks again with a spot.
+            # Nothing is pending, so a model that never follows up strands
+            # nothing — previously that silence became a stand-down and the
+            # user's answer arrived too late to matter.
+            return _ask_which(object_name, detection, options, records)
     else:
         records.append(
             GateRecord(G2_AMBIGUOUS, True, f"clearly on {match.zone.label}", match.as_log())
@@ -398,37 +445,183 @@ def _carry(fields: dict) -> dict:
     return {key: fields[key] for key in known if key in fields}
 
 
-def _resolve_ambiguity(
+def _clarify_options(
     object_name: str,
     detection: eyes.Detection,
     match: zones.ZoneMatch,
     zone_set: zones.ZoneSet,
-    clarify: Clarify,
-    records: list[GateRecord],
-    *,
-    frame=None,
-    timeout_s: float = config.APPROVAL_TIMEOUT_S,
-) -> zones.ZoneMatch | None:
-    """Ask WHICH one, then resolve the answer to a zone IN PYTHON.
-
-    The model relays the human's words; the matching from those words to a zone
-    happens here. A model that replies "the left one" cannot talk us into a zone
-    the human did not pick, and a reply that matches nothing is a stand-down
-    rather than a guess.
-    """
+    frame,
+) -> list[zones.Zone]:
+    """The spots worth offering the human as a choice."""
     if detection.candidates > 1:
         # Several things matched the name. locate() only reports HOW MANY, so
         # ask where they all are — otherwise we would offer the human a choice
         # between the winner and its nearest spot, which is a different question
         # from the one the scene is actually posing.
         options = _zones_holding(object_name, zone_set, frame)
-        if len(options) < 2:
-            # They are all on one spot (or we could not place them), so naming
-            # spots cannot separate them. Fall back to the geometric candidates.
-            options = [z for z in (match.zone, match.runner_up) if z is not None]
-    else:
-        options = [z for z in (match.zone, match.runner_up) if z is not None]
+        if len(options) >= 2:
+            return options
+    return [z for z in (match.zone, match.runner_up) if z is not None]
 
+
+def _question_for(object_name: str, detection: eyes.Detection, labels: list[str]) -> str:
+    if detection.candidates > 1:
+        return (
+            f"I can see more than one thing that could be the {object_name}. "
+            f"Which spot — {' or '.join(labels)}?"
+        )
+    return f"That {object_name} is sitting between {' and '.join(labels)}. Which one?"
+
+
+def _ask_which(
+    object_name: str,
+    detection: eyes.Detection,
+    options: list[zones.Zone],
+    records: list[GateRecord],
+) -> GatedResult:
+    """Return the question and stop. Nothing is pending; ask again with a spot.
+
+    This replaced a blocking wait on the voice model completing an answer_pick
+    round trip. It did not reliably complete, so the clarification timed out and
+    stood the pick down before the human's answer could count. Statelessness is
+    the fix: there is nothing left running to strand.
+    """
+    if len(options) < 2:
+        records.append(GateRecord(G2_AMBIGUOUS, False,
+                                  "ambiguous but there is no second spot to offer",
+                                  {"candidates": detection.candidates}))
+        result = GatedResult(
+            ok=False, object=object_name, stopped_at=G2_AMBIGUOUS,
+            reason=f"I'm not sure which {object_name} you mean, so I'm not going to guess.",
+            vision_confidence=detection.confidence, records=tuple(records),
+        )
+        log_event("gated_pick", **result.as_log())
+        return result
+
+    labels = [z.label for z in options]
+    question = _question_for(object_name, detection, labels)
+    records.append(
+        GateRecord(G2_AMBIGUOUS, False, "asked which spot",
+                   {"question": question, "options": labels})
+    )
+    log_event("gate_clarify_asked", object=object_name, question=question, options=labels)
+
+    result = GatedResult(
+        ok=False,
+        object=object_name,
+        stopped_at=G2_AMBIGUOUS,
+        reason=question,
+        vision_confidence=detection.confidence,
+        needs_clarification=True,
+        clarify_question=question,
+        clarify_options=tuple(labels),
+        records=tuple(records),
+    )
+    log_event("gated_pick", **result.as_log())
+    return result
+
+
+def _resolve_named_spot(
+    object_name: str,
+    spot: str,
+    detection: eyes.Detection,
+    match: zones.ZoneMatch,
+    zone_set: zones.ZoneSet,
+    records: list[GateRecord],
+    *,
+    frame=None,
+) -> zones.ZoneMatch | None:
+    """Resolve a human-named spot, and CONFIRM the object is really there.
+
+    Two independent checks, and both must pass:
+
+    1. The words name a real zone (``_match_zone_by_words`` over the actual zone
+       list, which refuses anything it cannot understand rather than guessing).
+    2. The object is actually DETECTED at that zone.
+
+    Check 2 is the invariant. The spot arrives as text relayed by the model, so
+    without it a jailbroken or confused model could name any spot and have the
+    arm grasp at thin air. With it, the worst a bad relay can do is pick the
+    wrong one of several places the object genuinely is.
+    """
+    chosen = _match_zone_by_words(spot, list(zone_set.zones))
+    if chosen is None:
+        records.append(
+            GateRecord(G2_AMBIGUOUS, False, f"no spot called {spot!r}",
+                       {"said": spot, "known": [z.label for z in zone_set.zones]})
+        )
+        log_event("gate_clarify_answered", answer=spot, resolved=None)
+        return None
+
+    confirmed = _detection_at_zone(object_name, detection, chosen, zone_set, frame)
+    if confirmed is None:
+        records.append(
+            GateRecord(G2_AMBIGUOUS, False,
+                       f"nothing matching {object_name!r} is on {chosen.label}",
+                       {"said": spot, "resolved": chosen.id})
+        )
+        log_event("gate_clarify_answered", answer=spot, resolved=chosen.id, confirmed=False)
+        return None
+
+    records.append(
+        GateRecord(G2_AMBIGUOUS, True, f"human chose {chosen.label}, and it is there",
+                   {"said": spot, "resolved": chosen.id, "confirmed_at": list(confirmed)})
+    )
+    log_event("gate_clarify_answered", answer=spot, resolved=chosen.id, confirmed=True)
+    return zones.ZoneMatch(
+        zone=chosen,
+        distance_px=math.dist(confirmed, chosen.pixel_center),
+        runner_up=None,
+        runner_up_distance_px=float("inf"),
+        reason=f"resolved by the operator: {spot!r}",
+    )
+
+
+def _detection_at_zone(
+    object_name: str,
+    detection: eyes.Detection,
+    zone: zones.Zone,
+    zone_set: zones.ZoneSet,
+    frame,
+) -> tuple[int, int] | None:
+    """Is the named object actually at this spot? The confirming pixel, or None."""
+    if detection.frame_size != zone_set.frame_size:
+        return None
+    if math.dist(detection.point, zone.pixel_center) <= config.ZONE_MAX_DISTANCE_PX:
+        return detection.point
+
+    # locate() reports only its single best point. With several instances on the
+    # table the human may well have named a different one, so look again before
+    # calling it absent — otherwise "pick the left one" fails whenever vision
+    # happened to prefer the right one.
+    if detection.candidates > 1:
+        try:
+            others = eyes.list_visible([object_name], frame=frame)
+        except eyes.EyesError as exc:
+            log.warning("could not re-check the named spot: %s", exc)
+            return None
+        for other in others:
+            if other.frame_size != zone_set.frame_size:
+                continue
+            if math.dist(other.point, zone.pixel_center) <= config.ZONE_MAX_DISTANCE_PX:
+                return other.point
+    return None
+
+
+def _resolve_ambiguity(
+    object_name: str,
+    detection: eyes.Detection,
+    options: list[zones.Zone],
+    clarify: Clarify,
+    records: list[GateRecord],
+    *,
+    timeout_s: float = config.CLARIFY_TIMEOUT_S,
+) -> zones.ZoneMatch | None:
+    """Blocking clarify, for the console paths. The voice agent uses _ask_which.
+
+    The model relays the human's words; the matching from those words to a zone
+    happens here. A reply that matches nothing is a stand-down, not a guess.
+    """
     if len(options) < 2:
         records.append(GateRecord(G2_AMBIGUOUS, False,
                                   "ambiguous but there is no second spot to offer",
@@ -436,12 +629,7 @@ def _resolve_ambiguity(
         return None
 
     labels = [z.label for z in options]
-    question = (
-        f"I can see more than one thing that could be the {object_name}. "
-        f"Which spot — {' or '.join(labels)}?"
-        if detection.candidates > 1
-        else f"That {object_name} is sitting between {' and '.join(labels)}. Which one?"
-    )
+    question = _question_for(object_name, detection, labels)
     log_event("gate_clarify_asked", object=object_name, question=question, options=labels)
 
     answer = _ask_with_deadline(clarify, (question, labels), timeout_s)
@@ -463,8 +651,8 @@ def _resolve_ambiguity(
                    {"question": question, "options": labels, "answer": str(answer),
                     "resolved": chosen.id})
     )
-    # Re-resolve to a settled match on the chosen zone. The margin is no longer
-    # what decides it — a human just did — so it is reported as clear.
+    # A settled match on the chosen zone. The margin is no longer what decides
+    # it — a human just did — so it is reported as clear.
     #
     # DELIBERATE CONSEQUENCE: an infinite margin means G4 sees full assignment
     # clarity, so a clarified pick often clears CONF_APPROVAL without a second
@@ -474,7 +662,7 @@ def _resolve_ambiguity(
     # in full, so a pick that is unsure about WHAT it sees is still gated.
     return zones.ZoneMatch(
         zone=chosen,
-        distance_px=match.distance_px if chosen is match.zone else match.runner_up_distance_px,
+        distance_px=0.0,
         runner_up=None,
         runner_up_distance_px=float("inf"),
         reason=f"resolved by the operator: {answer!r}",

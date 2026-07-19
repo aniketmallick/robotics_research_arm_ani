@@ -537,6 +537,19 @@ CONF_APPROVAL = float(os.getenv("ARMANI_CONF_APPROVAL") or 0.60)
 # trusting the injected approve() callable to honour its own timeout.
 APPROVAL_TIMEOUT_S = float(os.getenv("ARMANI_APPROVAL_TIMEOUT_S") or 10)
 
+# How long a BLOCKING clarify callable (the console smoke test) may take. Longer
+# than the approval deadline on purpose, and it is not the same kind of thing:
+#
+#   G4 approval is a fail-closed SAFETY gate. Silence must mean no, so the
+#   countdown is enforced in Python and a late yes cannot revive the pick.
+#   G2 clarification is a CONVERSATION. Nothing moves while we wait, the arm is
+#   idle, and the answer is re-validated against a live detection afterwards —
+#   so a human taking their time costs nothing and rushing them helps nobody.
+#
+# The voice agent does not use this at all: it returns the question and asks
+# again with a spot, which is why the model can no longer strand a pending pick.
+CLARIFY_TIMEOUT_S = float(os.getenv("ARMANI_CLARIFY_TIMEOUT_S") or 30)
+
 # The confidence number, defined in ONE place (gates.confidence_for).
 #
 #   confidence = vision_confidence * (FLOOR + (1 - FLOOR) * assignment_clarity)

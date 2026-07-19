@@ -77,7 +77,10 @@ Picking things up:
 - `pick` decides everything about safety itself. You do not. Your job is to say
   what it tells you and pass back what the human answers.
 - If it returns `need_clarification`, ask the human that exact question in your
-  own voice, then call `answer_pick` with what they say back.
+  own voice and then STOP and wait for them to answer. Never choose a spot
+  yourself. When they answer, call `pick` again with the same object and
+  `spot` set to exactly what they said ("front-left", "the left one" — their
+  words, not your interpretation). If they never answer, do nothing.
 - If it returns `needs_approval`, tell them the confidence number it gave you and
   ask if you should go for it, then call `approve_pick` with yes or no. You may
   be funny about a low number ("34%, that's a coin toss") — but never round it
@@ -348,8 +351,16 @@ def humanise(reason: str) -> str:
 class PendingPick:
     """One gated pick in flight, driven from the model's conversational turns."""
 
-    def __init__(self, worker: MotionWorker, object_name: str, *, verify_vlm: bool = True) -> None:
+    def __init__(
+        self,
+        worker: MotionWorker,
+        object_name: str,
+        *,
+        spot: str | None = None,
+        verify_vlm: bool = True,
+    ) -> None:
         self.object_name = object_name
+        self.spot = spot
         self.worker = worker
         self.verify_vlm = verify_vlm
         self.result: object | None = None
@@ -482,7 +493,13 @@ class PendingPick:
             result = gates.run_gated_pick(
                 self.worker.arm,
                 self.object_name,
-                clarify=self._clarify,
+                spot=self.spot,
+                # No clarify callable on purpose: the voice path is stateless.
+                # An ambiguous pick returns the question and leaves nothing
+                # pending, and the model asks again with spot=<what they said>.
+                # Blocking here is what used to strand a pick when the model
+                # never completed the answer_pick round trip.
+                clarify=None,
                 approve=self._approve,
                 perform=self._perform,
                 verify_vlm=self.verify_vlm,
@@ -517,6 +534,15 @@ def _pick_summary(result) -> dict:
             "zone": result.zone_label,
             "confidence": result.confidence,
             "verified": True,
+        }
+    if result.needs_clarification:
+        # Not a refusal. Ask the human, then call pick again with their answer.
+        return {
+            "status": "need_clarification",
+            "object": result.object,
+            "question": result.clarify_question,
+            "options": list(result.clarify_options),
+            "next": "ask them, then call pick again with spot set to what they say",
         }
     payload = {
         "status": "refused",
@@ -726,17 +752,22 @@ def build_tools(worker: MotionWorker) -> list:
     # move the arm past a gate.
 
     @function_tool
-    async def pick(object_name: str) -> dict:
+    async def pick(object_name: str, spot: str | None = None) -> dict:
         """Look for a named object and, if it is safe to, pick it up.
 
-        Runs the trust gates: it may come back asking you to clarify which
-        object was meant, or asking for approval when it is not confident.
+        Runs the trust gates. It may come back with "need_clarification" and a
+        question — when it does, ask the human that question, WAIT for them to
+        answer, and then call pick again with spot set to exactly what they
+        said. Never choose a spot yourself. If they do not answer, do nothing.
 
         Args:
             object_name: What to pick up, e.g. "red block" or "black cup".
+            spot: Which marked spot they named, e.g. "front-left". Only set this
+                when a human has just told you; leave it out otherwise.
         """
         object_name = (object_name or "").strip()
-        log_event("tool_pick", object=object_name)
+        spot = (spot or "").strip() or None
+        log_event("tool_pick", object=object_name, spot=spot)
         if not object_name:
             return {"status": "error", "error": "tell me what to pick up"}
         if not worker.motion_enabled:
@@ -749,7 +780,7 @@ def build_tools(worker: MotionWorker) -> list:
                 "doing": f"still working out the {pending.object_name}",
             }
 
-        pending = PendingPick(worker, object_name)
+        pending = PendingPick(worker, object_name, spot=spot)
         _pending["pick"] = pending
         pending.start()
         # Off the event loop: the pipeline's first step is a vision call.

@@ -515,6 +515,99 @@ def _pending(monkeypatch, object_name="red block", **kw):
     return agent.PendingPick(worker, object_name, verify_vlm=False, **kw)
 
 
+# --- G2 resolved by a named spot (the stateless re-call) -----------------
+
+
+def test_a_named_spot_skips_the_question_entirely(rig, monkeypatch):
+    see(monkeypatch, detection(point=BETWEEN))
+    verifies(monkeypatch)
+    ran: list[str] = []
+    result = gates.run_gated_pick(
+        FakeArm(), "red block", spot="front-right", clarify=never_called,
+        approve=lambda p, t: True, perform=performed(ran), verify_vlm=False,
+    )
+    assert result.ok, result.reason
+    assert result.clarified
+    assert ran == ["z2"]
+
+
+def test_a_spot_that_is_not_a_zone_is_refused(rig, monkeypatch):
+    see(monkeypatch, detection(point=BETWEEN))
+    ran: list[str] = []
+    result = gates.run_gated_pick(
+        FakeArm(), "red block", spot="nowhere", clarify=never_called,
+        approve=never_called, perform=performed(ran), verify_vlm=False,
+    )
+    assert not result.ok
+    assert result.stopped_at == gates.G2_AMBIGUOUS
+    assert not result.moved
+    assert ran == []
+
+
+def test_a_spot_the_object_is_not_on_is_refused(rig, monkeypatch):
+    """THE INVARIANT. The spot is text relayed by the model, so naming an empty
+    spot must not make the arm grasp at it."""
+    see(monkeypatch, detection(point=ON_Z1))   # the block is on front-LEFT
+    arm = FakeArm()
+    ran: list[str] = []
+    result = gates.run_gated_pick(
+        arm, "red block", spot="front-right", clarify=never_called,
+        approve=never_called, perform=performed(ran), verify_vlm=False,
+    )
+    assert not result.ok
+    assert result.stopped_at == gates.G2_AMBIGUOUS
+    assert "can't see a red block on front-right" in result.reason
+    assert ran == []
+    assert arm.sent == []
+
+
+def test_a_second_instance_on_the_named_spot_is_found(rig, monkeypatch):
+    """Two blocks, vision preferred the left one, the human said right. Looking
+    again finds it — otherwise 'pick the right one' fails on a coin flip."""
+    see(monkeypatch, detection(point=ON_Z1, candidates=2))
+    monkeypatch.setattr(
+        gates.eyes, "list_visible",
+        lambda names, frame=None: [detection(point=ON_Z1), detection(point=ON_Z2)],
+    )
+    verifies(monkeypatch)
+    ran: list[str] = []
+    result = gates.run_gated_pick(
+        FakeArm(), "red block", spot="front-right", clarify=never_called,
+        approve=lambda p, t: True, perform=performed(ran), verify_vlm=False,
+    )
+    assert result.ok, result.reason
+    assert ran == ["z2"]
+
+
+def test_an_ambiguous_pick_without_a_spot_asks_and_stops(rig, monkeypatch):
+    see(monkeypatch, detection(point=BETWEEN))
+    ran: list[str] = []
+    result = gates.run_gated_pick(
+        FakeArm(), "red block", clarify=None, approve=never_called,
+        perform=performed(ran), verify_vlm=False,
+    )
+    assert result.needs_clarification
+    assert not result.ok
+    assert not result.moved
+    assert ran == []
+    assert set(result.clarify_options) == {"front-left", "front-right"}
+    assert result.speak() == result.clarify_question
+
+
+def test_the_question_is_not_reported_as_a_plain_refusal(rig, monkeypatch):
+    """The dashboard and the model must be able to tell 'ask them' from 'no'."""
+    see(monkeypatch, detection(point=BETWEEN))
+    asked = gates.run_gated_pick(
+        FakeArm(), "red block", clarify=None, approve=never_called,
+        perform=never_called, verify_vlm=False,
+    )
+    refused = gates.run_gated_pick(
+        FakeArm(), "red block", spot="nowhere", clarify=None, approve=never_called,
+        perform=never_called, verify_vlm=False,
+    )
+    assert asked.needs_clarification and not refused.needs_clarification
+
+
 def _stub_macro(monkeypatch):
     """Make the macro instant, so these tests exercise gates and not motion.
 
@@ -532,7 +625,10 @@ def _stub_macro(monkeypatch):
     return macro
 
 
-def test_agent_pick_asks_for_clarification_then_resolves(rig, monkeypatch):
+def test_agent_pick_asks_which_and_leaves_nothing_pending(rig, monkeypatch):
+    """The old flow blocked on the model completing an answer_pick round trip.
+    It did not reliably complete, so the clarification timed out and stood the
+    pick down before the human's answer could count. Now it just asks."""
     see(monkeypatch, detection(point=BETWEEN))
     verifies(monkeypatch)
     _stub_macro(monkeypatch)
@@ -541,13 +637,30 @@ def test_agent_pick_asks_for_clarification_then_resolves(rig, monkeypatch):
     pending.worker.start()
     pending.start()
 
-    first = pending.next_event(timeout=5)
-    assert first["status"] == "need_clarification"
-    assert "which one" in first["question"].lower()
+    event = pending.next_event(timeout=5)
+    assert event["status"] == "need_clarification"
+    assert "which one" in event["question"].lower()
+    assert set(event["options"]) == {"front-left", "front-right"}
 
-    assert pending.reply("front-right")
-    following = pending.next_event(timeout=10)
-    assert following["status"] in ("started", "done")
+    # Nothing is left running, so a model that never follows up strands nothing.
+    time.sleep(0.3)
+    assert pending.finished
+    assert pending.worker.arm.sends == 0
+    pending.worker.shutdown()
+
+
+def test_agent_pick_with_a_spot_resolves_in_one_call(rig, monkeypatch):
+    """The second call carries the human's answer and completes with no round trip."""
+    see(monkeypatch, detection(point=BETWEEN))
+    verifies(monkeypatch)
+    _stub_macro(monkeypatch)
+
+    pending = _pending(monkeypatch, spot="front-right")
+    pending.worker.start()
+    pending.start()
+
+    event = pending.next_event(timeout=10)
+    assert event["status"] in ("started", "done"), event
     pending.worker.shutdown()
 
 
