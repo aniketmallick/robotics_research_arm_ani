@@ -287,6 +287,53 @@ from Python and is never rounded up.
 `gated_pick` event — which gate stopped it, the confidence, the approval, the
 verification. That is the judges' audit trail, and stage 7 renders exactly it.
 
+## How to run — stage 7 (dashboard + demo day)
+
+**The full demo script is `docs/demo_runbook.md`.** Read that on the day; this is
+the summary.
+
+```bash
+# 1. Go / no-go. ~90 seconds, one table, one verdict. Run it from the SAME
+#    terminal you will run the demo from (permissions belong to the app).
+python scripts/preflight.py
+
+# 2. The projector screen. Read-only — it never touches the arm.
+python scripts/run_dashboard.py            # -> http://localhost:8770
+
+# 3. The demo.
+python scripts/run_agent.py
+
+# Insurance: tell the whole gate story from a log recorded earlier.
+python scripts/run_dashboard.py --replay
+
+# Before travelling, and after any re-recording:
+python scripts/backup_datasets.py
+```
+
+**The dashboard reads, it does not run.** Everything on screen is derived from
+`logs/decisions.jsonl` and the last frame perception looked at — so it can only
+ever show what actually happened. It deliberately does **not** open the camera:
+the agent needs it, and two processes fighting over one C920 mid-demo is a risk
+with no upside. Built on the standard library's `http.server`, because the
+morning of a demo is the wrong time to pip-install a web framework.
+
+**Preflight is where the demo-day failures live.** The two that have actually
+bitten during this build:
+
+- **Gemini quota** — the free tier is 20 requests/day/model and one gated pick
+  spends 3–4. Preflight makes a real call and goes RED on 429, and WARNs if the
+  primary model is spent and you are running on the fallback.
+- **Kill-switch permission** — on macOS an untrusted process starts a key
+  listener happily and then never receives an event, so the ESC kill switch and
+  push-to-talk are both silently dead. Preflight checks `IS_TRUSTED`, not just
+  "did the listener start".
+
+**Back up the datasets.** `armani_gestures` and the pick macros live in the
+HuggingFace cache *outside the repo*; nothing in git protects them and
+re-recording needs the arm, the leader and half an hour you will not have at a
+venue. `scripts/backup_datasets.py` copies both into
+`armani/data/dataset_backup/` (gitignored — put it on a USB stick).
+
 ### Gestures
 
 Eight macros replayed from one local teleop dataset, one episode each:

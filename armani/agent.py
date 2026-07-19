@@ -79,6 +79,9 @@ Picking things up:
   and "nobody answered, so I stood down" are all good, honest answers.
 - After a pick you'll be told whether you actually got it. If you didn't, SAY SO.
   Never announce a success you weren't told about.
+- If a tool result includes a "say" field, that line is there because something
+  was slow or broken. Use it, or something like it, and keep moving. Never read
+  out an error code or a stack trace — nobody wants to hear a 429.
 """
 
 
@@ -248,6 +251,70 @@ class MotionWorker:
             self._queue.task_done()
 
 
+# --- Demo hardening: pre-written lines for the slow and broken moments ---
+#
+# Vision costs a few seconds and a macro costs ten more. The realtime model
+# cannot talk while it is awaiting a tool result, so the tools hand it a line to
+# say the moment they return. Pre-written means zero generation latency and,
+# more importantly, means the failure modes have been WORDED IN ADVANCE by
+# someone calm, rather than improvised in front of an audience.
+#
+# These are style only. Nothing here changes a gate, and the honest machine
+# reason always travels alongside in the same payload and into the decision log.
+
+QUIPS: dict[str, tuple[str, ...]] = {
+    "working": (
+        "Working on it.",
+        "Give me a second, I'm doing the robot equivalent of squinting.",
+        "On it. Try to look impressed.",
+    ),
+    "moving": (
+        "Going for it now.",
+        "Watch this. Or don't, I'm not your supervisor.",
+        "Moving. This is the part where I earn my keep.",
+    ),
+    "eyes_down": (
+        "My eyes are buffering. Give me a sec.",
+        "Vision's not answering right now — that's on my API bill, not on you.",
+        "I can't see a thing at the moment. Technical, not existential.",
+    ),
+    "slow": (
+        "That took longer than I'd like. Ask me again?",
+        "I lost my train of thought somewhere in the network stack.",
+    ),
+}
+
+_quip_turn: dict[str, int] = {}
+
+
+def quip(situation: str) -> str:
+    """One pre-written line, rotating so a rehearsal doesn't sound like a loop."""
+    lines = QUIPS.get(situation) or ()
+    if not lines:
+        return ""
+    index = _quip_turn.get(situation, 0)
+    _quip_turn[situation] = index + 1
+    return lines[index % len(lines)]
+
+
+# Substrings that mean "the vision service let us down", as opposed to "the
+# robot correctly decided not to do something". Only the former gets an excuse.
+_EYES_DOWN_MARKERS = ("quota", "429", "eyes aren't working", "timed out", "unavailable")
+
+
+def humanise(reason: str) -> str:
+    """An in-character line for an infrastructure failure, or '' for a real answer.
+
+    A refusal like "I can't see a red block" is already honest and in character —
+    it should reach the audience exactly as the gate worded it. A stack trace or
+    a 1.5 kB quota error should not.
+    """
+    lowered = (reason or "").lower()
+    if any(marker in lowered for marker in _EYES_DOWN_MARKERS):
+        return quip("eyes_down")
+    return ""
+
+
 # --- Gated pick: the return-to-model dialogue pattern --------------------
 #
 # The realtime session owns the audio, so a gate that needs a human answer
@@ -297,6 +364,7 @@ class PendingPick:
             return {
                 "status": "error",
                 "error": "the pick is taking too long; I've let it go",
+                "say": quip("slow"),
             }
 
     def reply(self, value: object) -> bool:
@@ -368,13 +436,15 @@ class PendingPick:
                 moved=False,
             )
 
-        # Motion is under way: let the model start talking about it now.
+        # Motion is under way: let the model start talking about it now, with a
+        # line ready so there is no dead air while the arm travels.
         self._events.put({
             "status": "started",
             "action": f"pick from {zone.label}",
             "zone": zone.label,
             "confidence": self._confidence,
             "eta_s": round(eta, 1),
+            "say": quip("moving"),
         })
 
         if not done.wait(timeout=eta + config.AGENT_PICK_MACRO_GRACE_S):
@@ -432,7 +502,7 @@ def _pick_summary(result) -> dict:
             "confidence": result.confidence,
             "verified": True,
         }
-    return {
+    payload = {
         "status": "refused",
         "object": result.object,
         "stopped_at": result.stopped_at,
@@ -441,6 +511,12 @@ def _pick_summary(result) -> dict:
         "moved": result.moved,
         "verified": result.verified,
     }
+    # An infrastructure failure gets a pre-written excuse; a genuine refusal
+    # ("I can't see a red block") is already in character and travels as-is.
+    excuse = humanise(result.reason)
+    if excuse:
+        payload["say"] = excuse
+    return payload
 
 
 # --- Tools ---------------------------------------------------------------

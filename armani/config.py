@@ -49,6 +49,18 @@ LOG_DIR = REPO_ROOT / "logs"
 DECISION_LOG = LOG_DIR / "decisions.jsonl"
 TEST_OUT_DIR = REPO_ROOT / "tests" / "out"
 
+# --- Dashboard (stage 7) -------------------------------------------------
+# The last frame perception actually looked at. The dashboard renders THIS
+# rather than opening the camera itself: two processes fighting over the C920
+# mid-demo is a risk with no upside, and "what the robot saw" is the honest
+# picture to show anyway.
+LAST_FRAME_PATH = LOG_DIR / "last_frame.jpg"
+DASHBOARD_PORT = int(os.getenv("ARMANI_DASHBOARD_PORT") or 8770)
+# How many decision-log records the dashboard keeps in its feed.
+DASHBOARD_FEED_LIMIT = 40
+# Where scripts/backup_datasets.py copies the irreplaceable recordings.
+DATASET_BACKUP_DIR = REPO_ROOT / "armani" / "data" / "dataset_backup"
+
 # --- Dry run -------------------------------------------------------------
 # When true, nothing is sent to the motors; intended actions are printed.
 DRY_RUN = _env_flag("ARMANI_DRY_RUN", default=False)
@@ -583,9 +595,12 @@ AGENT_PICK_MACRO_GRACE_S = 20.0
 # --- Models --------------------------------------------------------------
 REALTIME_MODEL = "gpt-realtime-2.1"
 
+# Fallback order. gemini-robotics-er-1.5-preview was REMOVED on 2026-07-19: it
+# now returns 404 "no longer available", so leaving it in the chain spent a
+# round trip on a dead model between the primary and the working fallback —
+# latency we cannot afford mid-demo.
 GEMINI_MODELS: tuple[str, ...] = (
     "gemini-robotics-er-1.6-preview",
-    "gemini-robotics-er-1.5-preview",
     "gemini-flash-latest",
 )
 ANTHROPIC_MODEL = "claude-sonnet-4-5"

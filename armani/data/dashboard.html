@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ARM-ANI — the robot's mind</title>
+<style>
+  /* Sized for a projector read from three metres, not a laptop read from one. */
+  :root{
+    --bg:#0b0f14; --panel:#141b24; --line:#243244; --ink:#e8eef6; --dim:#8fa3ba;
+    --pass:#3ddc84; --stop:#ff5f56; --wait:#ffb020; --cool:#4aa8ff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  header{display:flex;align-items:center;gap:18px;padding:14px 22px;
+         border-bottom:2px solid var(--line);background:var(--panel)}
+  h1{margin:0;font-size:26px;letter-spacing:.18em}
+  .badge{padding:5px 14px;border-radius:999px;font-size:15px;font-weight:700;letter-spacing:.1em}
+  .live{background:var(--pass);color:#04120a}
+  .replay{background:var(--cool);color:#03121f}
+  .spacer{flex:1}
+  .clock{color:var(--dim);font-size:19px}
+
+  main{display:grid;grid-template-columns:minmax(420px,1fr) 1fr;gap:18px;padding:18px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .panel h2{margin:0 0 12px;font-size:14px;letter-spacing:.22em;color:var(--dim);font-weight:600}
+
+  #stage{position:relative;width:100%;background:#000;border-radius:8px;overflow:hidden;
+         aspect-ratio:4/3}
+  #shot{width:100%;height:100%;object-fit:contain;display:block}
+  #overlay{position:absolute;inset:0;width:100%;height:100%}
+  .noshot{position:absolute;inset:0;display:grid;place-items:center;color:var(--dim);font-size:18px}
+
+  .headline{font-size:44px;font-weight:800;letter-spacing:.02em;line-height:1.1;margin:2px 0 6px}
+  .ok{color:var(--pass)} .bad{color:var(--stop)} .hold{color:var(--wait)}
+  .subject{font-size:26px;margin-bottom:4px}
+  .where{color:var(--dim);font-size:18px;margin-bottom:16px}
+  .said{font-size:17px;color:var(--ink);opacity:.85;min-height:24px;margin-bottom:14px}
+
+  /* Confidence against the approval line — the number that is the whole pitch. */
+  .confwrap{margin:6px 0 20px}
+  .confhead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
+  .confnum{font-size:40px;font-weight:800}
+  .conflabel{color:var(--dim);font-size:14px;letter-spacing:.16em}
+  .track{position:relative;height:26px;background:#0a0e13;border:1px solid var(--line);border-radius:6px}
+  .fill{height:100%;border-radius:5px;transition:width .35s ease}
+  .mark{position:absolute;top:-7px;bottom:-7px;width:3px;background:var(--ink);opacity:.9}
+  .markcap{position:absolute;top:-24px;transform:translateX(-50%);font-size:12px;color:var(--dim);white-space:nowrap}
+
+  .gates{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:6px}
+  .gate{border:2px solid var(--line);border-radius:9px;padding:10px 6px;text-align:center;background:#0a0e13}
+  .gate .name{font-size:13px;letter-spacing:.1em;font-weight:700}
+  .gate .dot{font-size:20px;line-height:1.2}
+  .gate.passed{border-color:var(--pass)} .gate.passed .name{color:var(--pass)}
+  .gate.stopped{border-color:var(--stop);background:#2a1114} .gate.stopped .name{color:var(--stop)}
+  .gate.pending{opacity:.38}
+  .gatedetail{color:var(--dim);font-size:14px;min-height:20px;margin-top:6px}
+
+  .totals{display:flex;gap:20px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line);
+          color:var(--dim);font-size:15px}
+  .totals b{color:var(--ink);font-size:19px}
+
+  #feed{max-height:34vh;overflow:auto}
+  .row{display:grid;grid-template-columns:78px 90px 1fr;gap:10px;padding:6px 0;
+       border-bottom:1px solid #1b2531;font-size:15px}
+  .row .t{color:var(--dim)}
+  .row .tag{color:var(--cool);letter-spacing:.08em}
+  .row.bad .tag{color:var(--stop)}
+  .row.bad .msg{color:#ffc9c6}
+  footer{padding:10px 22px;color:var(--dim);font-size:13px;border-top:1px solid var(--line)}
+</style>
+</head>
+<body>
+<header>
+  <h1>ARM-ANI</h1>
+  <span id="mode" class="badge live">LIVE</span>
+  <span class="spacer"></span>
+  <span class="clock" id="clock">--:--:--</span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>WHAT IT SEES</h2>
+    <div id="stage">
+      <img id="shot" alt="last frame">
+      <canvas id="overlay"></canvas>
+      <div class="noshot" id="noshot">no frame yet</div>
+    </div>
+    <div class="panel" style="margin-top:16px;background:transparent;border:0;padding:0">
+      <h2 style="margin-top:14px">DECISION LOG</h2>
+      <div id="feed"></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>THE PICK</h2>
+    <div class="headline" id="headline">waiting…</div>
+    <div class="subject" id="subject">—</div>
+    <div class="where" id="where"></div>
+    <div class="said" id="said"></div>
+
+    <div class="confwrap">
+      <div class="confhead">
+        <span class="conflabel">CONFIDENCE</span>
+        <span class="confnum" id="confnum">—</span>
+      </div>
+      <div class="track">
+        <div class="fill" id="fill" style="width:0"></div>
+        <div class="mark" id="mark"><span class="markcap" id="markcap"></span></div>
+      </div>
+    </div>
+
+    <h2>GATES</h2>
+    <div class="gates" id="gates"></div>
+    <div class="gatedetail" id="gatedetail"></div>
+
+    <div class="totals" id="totals"></div>
+  </section>
+</main>
+
+<footer id="foot">read-only · derived entirely from logs/decisions.jsonl · never touches the arm</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+let frameSize = {width: 640, height: 480};
+
+async function poll() {
+  try {
+    const state = await (await fetch('/api/state', {cache: 'no-store'})).json();
+    render(state);
+  } catch (err) {
+    $('foot').textContent = 'dashboard lost the server — is run_dashboard.py still running?';
+  }
+  setTimeout(poll, 500);
+}
+
+function render(s) {
+  frameSize = s.frame;
+  $('clock').textContent = s.clock;
+  const replay = s.mode !== 'LIVE';
+  $('mode').textContent = s.mode;
+  $('mode').className = 'badge ' + (replay ? 'replay' : 'live');
+
+  const p = s.pick;
+  if (p) {
+    const tone = p.ok ? 'ok' : (p.timed_out ? 'hold' : 'bad');
+    $('headline').className = 'headline ' + tone;
+    $('headline').textContent = p.headline;
+    $('subject').textContent = p.object || '—';
+    $('where').textContent = p.zone_label
+      ? `spot: ${p.zone_label}${p.clarified ? '  · operator chose it' : ''}` : '';
+    $('said').textContent = p.reason || (p.verified ? 'verified in the gripper' : '');
+    drawConfidence(p.confidence, s.threshold, p.ok);
+  } else {
+    $('headline').textContent = 'waiting…';
+    $('headline').className = 'headline';
+    $('subject').textContent = '—';
+    $('where').textContent = '';
+    $('said').textContent = '';
+    drawConfidence(null, s.threshold, false);
+  }
+
+  $('gates').innerHTML = s.gates.map(g =>
+    `<div class="gate ${g.state}">
+       <div class="dot">${g.state === 'passed' ? '✓' : g.state === 'stopped' ? '✕' : '·'}</div>
+       <div class="name">${g.caption}</div>
+     </div>`).join('');
+  const stopped = s.gates.find(g => g.state === 'stopped');
+  const lastPassed = [...s.gates].reverse().find(g => g.state === 'passed');
+  $('gatedetail').textContent = (stopped || lastPassed || {}).detail || '';
+
+  const t = s.totals;
+  $('totals').innerHTML =
+    `<span><b>${t.picks}</b> picks</span>` +
+    `<span><b>${t.completed}</b> completed</span>` +
+    `<span><b>${t.clarified}</b> clarified</span>` +
+    `<span><b>${t.stood_down}</b> stood down</span>` +
+    `<span><b>${t.refused}</b> refused</span>`;
+
+  $('feed').innerHTML = s.feed.map(r =>
+    `<div class="row ${r.bad ? 'bad' : ''}">
+       <span class="t">${r.clock}</span>
+       <span class="tag">${r.tag}</span>
+       <span class="msg">${escapeHtml(r.text)}</span>
+     </div>`).join('');
+
+  drawOverlay(s);
+}
+
+function drawConfidence(value, threshold, ok) {
+  const pct = Math.round((threshold || 0.6) * 100);
+  $('mark').style.left = pct + '%';
+  $('markcap').textContent = `approval ${pct}%`;
+  if (value === null || value === undefined) {
+    $('confnum').textContent = '—';
+    $('fill').style.width = '0';
+    return;
+  }
+  const v = Math.max(0, Math.min(1, value));
+  $('confnum').textContent = Math.round(v * 100) + '%';
+  $('fill').style.width = (v * 100) + '%';
+  // Colour by the gate's own rule, not by whether the pick happened to work.
+  $('fill').style.background = v >= (threshold || 0.6) ? 'var(--pass)' : 'var(--wait)';
+  $('confnum').style.color = v >= (threshold || 0.6) ? 'var(--pass)' : 'var(--wait)';
+}
+
+function drawOverlay(s) {
+  const img = $('shot'), cv = $('overlay'), ctx = cv.getContext('2d');
+  const box = img.getBoundingClientRect();
+  cv.width = box.width; cv.height = box.height;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!box.width) return;
+
+  // The image is object-fit:contain, so letterboxing has to be undone before
+  // frame pixels can be mapped onto the element.
+  const scale = Math.min(box.width / frameSize.width, box.height / frameSize.height);
+  const offX = (box.width - frameSize.width * scale) / 2;
+  const offY = (box.height - frameSize.height * scale) / 2;
+  const at = (x, y) => [offX + x * scale, offY + y * scale];
+
+  // The table is pale wood under bright light, so anything drawn in a mid grey
+  // vanishes. Every mark gets a dark halo and every label a dark outline, which
+  // is what makes this readable from the back of a room on a projector.
+  const ring = (x, y, r, colour, width) => {
+    ctx.lineWidth = width + 3;
+    ctx.strokeStyle = 'rgba(0,0,0,.65)';
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.lineWidth = width;
+    ctx.strokeStyle = colour;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+  };
+  const label = (text, x, y, colour, size) => {
+    ctx.font = `700 ${size}px ui-monospace, monospace`;
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(0,0,0,.8)';
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = colour;
+    ctx.fillText(text, x, y);
+  };
+
+  for (const z of s.zones) {
+    const [x, y] = at(z.x, z.y);
+    const active = s.pick && s.pick.zone === z.id;
+    const colour = active ? '#3ddc84' : '#dce6f2';
+    ring(x, y, active ? 24 : 18, colour, active ? 4 : 3);
+    label(z.label, x + 27, y + 5, colour, 15);
+  }
+
+  const d = s.detection;
+  if (d) {
+    const [x, y] = at(d.point[0], d.point[1]);
+    ctx.lineJoin = 'round';
+    for (const [colour, width] of [['rgba(0,0,0,.7)', 8], ['#ffb020', 4]]) {
+      ctx.strokeStyle = colour; ctx.lineWidth = width;
+      ctx.beginPath();
+      ctx.moveTo(x - 18, y); ctx.lineTo(x + 18, y);
+      ctx.moveTo(x, y - 18); ctx.lineTo(x, y + 18);
+      ctx.stroke();
+    }
+    label(`${d.label} ${Math.round(d.confidence * 100)}%`, x + 24, y - 14, '#ffb020', 17);
+  }
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// The frame changes far less often than the state; reloading it at 1 Hz keeps
+// the picture current without hammering the disk.
+function refreshFrame() {
+  const img = $('shot');
+  const next = new Image();
+  next.onload = () => { img.src = next.src; $('noshot').style.display = 'none'; };
+  next.src = '/api/frame.jpg?t=' + Date.now();
+  setTimeout(refreshFrame, 1000);
+}
+
+window.addEventListener('resize', () => {});
+poll();
+refreshFrame();
+</script>
+</body>
+</html>

@@ -138,6 +138,8 @@ def capture_frame(index: int | None = None):
     finally:
         capture.release()
 
+    _publish_frame(frame)
+
     height, width = frame.shape[:2]
     if (width, height) != (config.CAMERA_WIDTH, config.CAMERA_HEIGHT):
         # Not fatal — points are normalised — but the homography was computed at
@@ -149,6 +151,23 @@ def capture_frame(index: int | None = None):
             width, height, config.CAMERA_WIDTH, config.CAMERA_HEIGHT,
         )
     return frame
+
+
+def _publish_frame(frame) -> None:
+    """Drop the latest frame where the dashboard can pick it up.
+
+    Best-effort and silent by design: this exists so a screen can show what the
+    robot saw, and a full disk or a missing directory must never take down
+    perception. The dashboard reads this file instead of opening the camera
+    itself, so the two never fight over the C920 mid-demo.
+    """
+    try:
+        import cv2
+
+        config.LAST_FRAME_PATH.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(config.LAST_FRAME_PATH), frame)
+    except Exception as exc:
+        log.debug("could not publish the frame for the dashboard: %s", exc)
 
 
 def encode_jpeg(frame) -> bytes:
