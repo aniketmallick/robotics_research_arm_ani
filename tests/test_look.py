@@ -248,7 +248,13 @@ def test_the_detail_survives_the_brevity_suffix():
 def test_persona_covers_the_new_behaviour():
     assert "ONE short line" in agent.PERSONA
     assert "Never narrate or explain what you just did" in agent.PERSONA
-    assert "Hinglish is a garnish, not the meal" in agent.PERSONA
+
+
+def test_persona_tone_is_plain_deadpan():
+    """The Hinglish/Indian-sarcasm layer was reverted; only the base tone remains."""
+    assert "Deadpan and dry beats loud and hyper" in agent.PERSONA
+    for reverted in ("Hinglish", "haan haan", "kya scene hai", "wah, genius", "arre"):
+        assert reverted not in agent.PERSONA
 
 
 def test_persona_keeps_the_humour_a_garnish_not_a_rule_change():
