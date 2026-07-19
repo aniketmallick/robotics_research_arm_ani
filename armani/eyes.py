@@ -594,6 +594,76 @@ def list_visible(candidates: list[str], frame=None) -> list[Detection]:
     return detections
 
 
+# --- Open-vocabulary scene survey ----------------------------------------
+
+SCENE_PROMPT = (
+    "List the distinct physical objects sitting on the table surface in front of you. "
+    "Ignore the background, walls, people, cables, the plant, and the robot arm itself. "
+    'Reply as a JSON array of short lowercase object names, e.g. '
+    '["wooden log","charger","red block"].'
+)
+
+# A scene reply is a handful of short names. A much longer list means the model
+# started describing the room, and passing fifty "objects" to the voice agent
+# would have it reading an inventory at the audience.
+MAX_SCENE_OBJECTS = 12
+MAX_SCENE_NAME_CHARS = 40
+
+
+def describe_scene(frame=None) -> list[str]:
+    """Everything on the table, in the model's own words. Open vocabulary.
+
+    Unlike ``locate``/``list_visible``, this is not restricted to
+    ``config.OBJECT_CATALOG`` — it answers "what IS this?" rather than "where is
+    the thing I named?". That is the right question for "what's on the table?"
+    and the wrong one for a pick, which still needs a point.
+
+    Returns names only; there are no coordinates to assign to a zone. Never
+    raises: nothing seen, an unparseable reply and a dead network all come back
+    as an empty list, because a scene survey failing must not take down a turn.
+    """
+    try:
+        if frame is None:
+            frame = capture_frame()
+        model, raw = _ask(encode_jpeg(frame), SCENE_PROMPT)
+    except Exception as exc:
+        log.warning("scene survey failed: %s", exc)
+        return []
+
+    try:
+        payload = _extract_json(raw)
+    except ValueError as exc:
+        log.warning("unreadable scene reply from %s: %s", model, exc)
+        return []
+
+    # Tolerate {"objects": [...]} as well as a bare array — same latitude the
+    # pointing parser gives, for the same reason.
+    if isinstance(payload, dict):
+        for key in ("objects", "items", "things"):
+            if isinstance(payload.get(key), list):
+                payload = payload[key]
+                break
+    if not isinstance(payload, list):
+        log.warning("scene reply was %s, not a list", type(payload).__name__)
+        return []
+
+    names: list[str] = []
+    for entry in payload:
+        # A model that returns [{"name": "charger"}] is not wrong enough to bin.
+        if isinstance(entry, dict):
+            entry = entry.get("name") or entry.get("object") or entry.get("label")
+        if not isinstance(entry, str):
+            continue
+        name = " ".join(entry.split()).strip().lower()[:MAX_SCENE_NAME_CHARS]
+        if name and name not in names:
+            names.append(name)
+        if len(names) >= MAX_SCENE_OBJECTS:
+            break
+
+    log_event("eyes_describe_scene", model=model, count=len(names), objects=names)
+    return names
+
+
 # --- Grasp verification (trust gate G5) ----------------------------------
 
 

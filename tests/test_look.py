@@ -1,6 +1,7 @@
-"""The read-only scene survey behind the look() tool, and the fixed greeting.
+"""The open-vocabulary scene survey behind look(), the greeting, and brevity.
 
-No camera, no network, no arm — eyes.list_visible is stubbed throughout.
+No camera, no network, no arm — eyes.describe_scene (or the model call under it)
+is stubbed throughout.
 """
 
 from __future__ import annotations
@@ -15,38 +16,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from armani import agent, config, eyes, zones  # noqa: E402
-
-FRAME = (640, 480)
-
-ZONES = zones.ZoneSet(
-    zones=(
-        zones.Zone("z1", "front-left", (100, 300), 0),
-        zones.Zone("z2", "centre", (320, 300), 1),
-    ),
-    frame_size=FRAME,
-    created="test",
-)
-
-ON_Z1 = (102, 302)
-ON_Z2 = (322, 302)
-OFF_THE_SPOTS = (600, 40)
-
-
-def detection(label, point, frame_size=FRAME):
-    return eyes.Detection(
-        label=label, point=point, confidence=0.9, frame_size=frame_size, model="test"
-    )
+from armani import agent, config, eyes  # noqa: E402
 
 
 @pytest.fixture
-def table(monkeypatch):
-    """Zones loaded; the caller stubs what vision returns."""
-    monkeypatch.setattr(zones, "load_zones", lambda *a, **k: ZONES)
-    monkeypatch.setattr(eyes, "capture_frame", lambda *a, **k: object())
+def scene(monkeypatch):
+    """Stub the open-vocabulary survey."""
 
-    def sees(*detections):
-        monkeypatch.setattr(eyes, "list_visible", lambda names, frame=None: list(detections))
+    def sees(*names):
+        monkeypatch.setattr(eyes, "describe_scene", lambda frame=None: list(names))
 
     return sees
 
@@ -54,85 +32,142 @@ def table(monkeypatch):
 # --- the JSON shape the model speaks ------------------------------------
 
 
-def test_returns_each_object_with_its_spot(table):
-    table(detection("red block", ON_Z1), detection("charger", ON_Z2))
-    result = agent.survey_table()
-    assert result == {
-        "objects": [
-            {"name": "red block", "spot": "front-left"},
-            {"name": "charger", "spot": "centre"},
-        ],
-        "count": 2,
+def test_returns_every_object_it_can_see(scene):
+    scene("wooden log", "charger", "red block")
+    assert agent.survey_table() == {
+        "objects": ["wooden log", "charger", "red block"],
+        "count": 3,
     }
 
 
-def test_an_object_off_every_spot_has_a_null_spot(table):
-    """Still reported — it IS on the table — but with no location claimed."""
-    table(detection("marker pen", OFF_THE_SPOTS))
+def test_it_is_not_limited_to_the_pick_catalog(scene):
+    """The catalog is what the arm was TAUGHT to pick, not the limit of what it
+    can see. Reporting a wooden log as nothing was the bug this fixes."""
+    scene("wooden log", "coffee mug", "pair of scissors")
     result = agent.survey_table()
-    assert result["objects"] == [{"name": "marker pen", "spot": None}]
-    assert result["count"] == 1
+    assert result["count"] == 3
+    assert not set(result["objects"]) & set(config.OBJECT_CATALOG)
 
 
-def test_nothing_seen_says_so_honestly(table):
-    table()
+def test_nothing_seen_says_so_honestly(scene):
+    scene()
     result = agent.survey_table()
     assert result["objects"] == []
     assert result["count"] == 0
     assert "can't see" in result["note"]
 
 
-def test_a_vision_failure_is_a_note_not_an_exception(table, monkeypatch):
-    """A tool error would surface as a stack trace mid-demo."""
+def test_a_vision_failure_is_a_note_not_an_exception(monkeypatch):
+    """A tool that raises is a stack trace on stage."""
 
-    def boom(names, frame=None):
+    def boom(frame=None):
         raise eyes.EyesError("quota exhausted")
 
-    monkeypatch.setattr(eyes, "list_visible", boom)
+    monkeypatch.setattr(eyes, "describe_scene", boom)
     result = agent.survey_table()
     assert result["objects"] == []
     assert "eyes aren't working" in result["note"]
 
 
-def test_a_camera_failure_is_also_a_note(monkeypatch):
-    def boom(*a, **k):
-        raise eyes.EyesError("camera busy")
-
-    monkeypatch.setattr(eyes, "capture_frame", boom)
-    result = agent.survey_table()
-    assert result["objects"] == []
-    assert "note" in result
-
-
-def test_locations_are_not_claimed_across_frame_sizes(table):
-    """Pixels only mean something at the size the zones were clicked at."""
-    table(detection("red block", ON_Z1, frame_size=(1280, 960)))
-    assert agent.survey_table()["objects"] == [{"name": "red block", "spot": None}]
-
-
-def test_no_zones_defined_still_lists_the_objects(table, monkeypatch):
-    monkeypatch.setattr(zones, "load_zones", lambda *a, **k: None)
-    table(detection("charger", ON_Z2))
-    assert agent.survey_table()["objects"] == [{"name": "charger", "spot": None}]
-
-
-def test_result_is_json_serialisable(table):
-    table(detection("red block", ON_Z1), detection("marker pen", OFF_THE_SPOTS))
+def test_result_is_json_serialisable(scene):
+    scene("wooden log", "charger")
     json.dumps(agent.survey_table(), allow_nan=False)
 
 
-def test_one_vision_call_for_the_whole_catalog(table, monkeypatch):
+def test_one_vision_call_per_survey(monkeypatch):
     """Quota matters: a survey must not cost one request per object."""
-    calls: list[list[str]] = []
+    calls: list[int] = []
 
-    def once(names, frame=None):
-        calls.append(list(names))
-        return []
+    def once(frame=None):
+        calls.append(1)
+        return ["charger"]
 
-    monkeypatch.setattr(eyes, "list_visible", once)
+    monkeypatch.setattr(eyes, "describe_scene", once)
     agent.survey_table()
     assert len(calls) == 1
-    assert calls[0] == list(config.OBJECT_CATALOG)
+
+
+# --- describe_scene parsing ---------------------------------------------
+
+
+def reply(monkeypatch, raw):
+    monkeypatch.setattr(eyes, "capture_frame", lambda *a, **k: object())
+    monkeypatch.setattr(eyes, "encode_jpeg", lambda frame: b"")
+    monkeypatch.setattr(eyes, "_ask", lambda jpeg, prompt: ("test-model", raw))
+
+
+def test_plain_json_array(monkeypatch):
+    reply(monkeypatch, '["wooden log", "charger"]')
+    assert eyes.describe_scene() == ["wooden log", "charger"]
+
+
+def test_fenced_json_is_accepted(monkeypatch):
+    reply(monkeypatch, '```json\n["red block"]\n```')
+    assert eyes.describe_scene() == ["red block"]
+
+
+def test_names_are_normalised(monkeypatch):
+    reply(monkeypatch, '["  Wooden   LOG ", "Charger"]')
+    assert eyes.describe_scene() == ["wooden log", "charger"]
+
+
+def test_duplicates_are_collapsed(monkeypatch):
+    reply(monkeypatch, '["charger", "Charger", "CHARGER"]')
+    assert eyes.describe_scene() == ["charger"]
+
+
+def test_a_wrapped_object_list_is_tolerated(monkeypatch):
+    reply(monkeypatch, '{"objects": ["charger", "red block"]}')
+    assert eyes.describe_scene() == ["charger", "red block"]
+
+
+def test_entries_that_are_objects_are_tolerated(monkeypatch):
+    reply(monkeypatch, '[{"name": "charger"}, {"name": "red block"}]')
+    assert eyes.describe_scene() == ["charger", "red block"]
+
+
+def test_non_string_entries_are_skipped(monkeypatch):
+    reply(monkeypatch, '["charger", 42, null, {"nope": 1}, "red block"]')
+    assert eyes.describe_scene() == ["charger", "red block"]
+
+
+def test_an_empty_array_is_empty(monkeypatch):
+    reply(monkeypatch, "[]")
+    assert eyes.describe_scene() == []
+
+
+@pytest.mark.parametrize("raw", ["", "not json at all", "{}", '"a string"', "12"])
+def test_unparseable_replies_return_empty_and_never_raise(monkeypatch, raw):
+    reply(monkeypatch, raw)
+    assert eyes.describe_scene() == []
+
+
+def test_a_runaway_list_is_capped(monkeypatch):
+    """A model that starts describing the room must not have the robot read an
+    inventory at the audience."""
+    reply(monkeypatch, json.dumps([f"thing {i}" for i in range(200)]))
+    assert len(eyes.describe_scene()) == eyes.MAX_SCENE_OBJECTS
+
+
+def test_absurdly_long_names_are_trimmed(monkeypatch):
+    reply(monkeypatch, json.dumps(["x" * 500]))
+    assert len(eyes.describe_scene()[0]) <= eyes.MAX_SCENE_NAME_CHARS
+
+
+def test_a_dead_network_returns_empty(monkeypatch):
+    monkeypatch.setattr(eyes, "capture_frame", lambda *a, **k: object())
+    monkeypatch.setattr(eyes, "encode_jpeg", lambda frame: b"")
+
+    def boom(jpeg, prompt):
+        raise eyes.EyesError("quota exhausted")
+
+    monkeypatch.setattr(eyes, "_ask", boom)
+    assert eyes.describe_scene() == []
+
+
+def test_the_prompt_asks_for_the_table_and_excludes_the_arm():
+    for phrase in ("table surface", "robot arm itself", "JSON array"):
+        assert phrase in eyes.SCENE_PROMPT
 
 
 # --- look() is read-only -------------------------------------------------
@@ -147,10 +182,10 @@ def test_look_is_registered_and_needs_no_motion():
     assert "look" in names
 
 
-def test_survey_never_commands_the_arm(table):
+def test_survey_never_commands_the_arm(scene):
     from armani import motion
 
-    table(detection("red block", ON_Z1))
+    scene("red block")
     arm = motion.DryRunArm()
     agent.survey_table()
     assert arm.sends == 0

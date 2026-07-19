@@ -182,11 +182,21 @@ async def _run(worker: agent.MotionWorker, *, text_mode: bool, motion_enabled: b
         await session.send_message(_greeting_instruction(text_mode))
 
 
+        # Set while the model has a response in flight, so a barge-in only
+        # cancels something that exists. Written by the event pump, read by the
+        # push-to-talk listener on another thread.
+        responding = threading.Event()
+
         background = [
-            asyncio.create_task(_pump_events(session, worker, text_mode=text_mode)),
+            asyncio.create_task(
+                _pump_events(session, worker, text_mode=text_mode, responding=responding)
+            ),
             asyncio.create_task(_pump_completions(session, worker)),
         ]
-        input_coro = _text_input(session) if text_mode else _voice_input(session, worker)
+        input_coro = (
+            _text_input(session) if text_mode
+            else _voice_input(session, worker, responding=responding)
+        )
         input_task = asyncio.create_task(input_coro)
 
         try:
@@ -206,7 +216,9 @@ async def _run(worker: agent.MotionWorker, *, text_mode: bool, motion_enabled: b
 # --- Event handling ------------------------------------------------------
 
 
-async def _pump_events(session, worker: agent.MotionWorker, *, text_mode: bool) -> None:
+async def _pump_events(
+    session, worker: agent.MotionWorker, *, text_mode: bool, responding: threading.Event
+) -> None:
     """Print transcripts, play audio, and hand the freeze menu to the operator."""
     # No speaker in text mode — there is no audio, and opening an output stream
     # that never plays just risks a device error on machines without one.
@@ -215,7 +227,11 @@ async def _pump_events(session, worker: agent.MotionWorker, *, text_mode: bool) 
     try:
         async for event in session:
             etype = event.type
-            if etype == "audio":
+            if etype == "agent_start":
+                responding.set()
+            elif etype == "audio":
+                # Audio implies a live response even if agent_start never fired.
+                responding.set()
                 # The arm moving is the more informative thing to show, and it
                 # is the safety-relevant one, so "doing" outranks "talking"
                 # while a macro runs. publish() dedupes, so calling it on every
@@ -224,9 +240,12 @@ async def _pump_events(session, worker: agent.MotionWorker, *, text_mode: bool) 
                     uistate.publish(uistate.TALKING)
                 if player is not None:
                     player.play(event.audio.data)
-            elif etype == "audio_interrupted" and player is not None:
-                player.flush()  # barge-in: drop what we were about to say
+            elif etype == "audio_interrupted":
+                responding.clear()
+                if player is not None:
+                    player.flush()  # barge-in: drop what we were about to say
             elif etype == "agent_end":
+                responding.clear()
                 # Turn over. If the arm is still moving, leave the face on
                 # "doing" — the worker publishes idle when it actually stops.
                 if not worker.busy:
@@ -342,7 +361,9 @@ class _Speaker:
             pass
 
 
-async def _voice_input(session, worker: agent.MotionWorker) -> None:
+async def _voice_input(
+    session, worker: agent.MotionWorker, *, responding: threading.Event
+) -> None:
     """Stream mic audio while the PTT key is held; commit + respond on release."""
     import numpy as np  # noqa: F401  (sounddevice returns numpy-friendly buffers)
     import sounddevice as sd
@@ -368,7 +389,7 @@ async def _voice_input(session, worker: agent.MotionWorker) -> None:
             talking.set()
             uistate.publish(uistate.LISTENING)
             # Barge-in: pressing space while it speaks interrupts the model.
-            asyncio.run_coroutine_threadsafe(_interrupt(session), loop)
+            asyncio.run_coroutine_threadsafe(_interrupt(session, responding), loop)
 
     def on_release(k: object) -> None:
         if k == key and talking.is_set():
@@ -441,10 +462,17 @@ async def _commit_and_respond(session) -> None:
         uistate.publish(uistate.IDLE)
 
 
-# The realtime API rejects a truncate past what has actually been played. It is
-# a race we cannot win from here — audio is in flight — and it is harmless, so
-# it is recognised and swallowed rather than shown to the operator as an error.
-_HARMLESS_AUDIO_ERRORS = ("already shorter", "audio_end_ms", "invalid_value")
+# Races we cannot win from here and that harm nothing:
+#   * a truncate past what has actually been played (audio is in flight)
+#   * cancelling a response that finished a moment before the key went down
+# Both are recognised and swallowed rather than shown to the operator as errors.
+_HARMLESS_AUDIO_ERRORS = (
+    "already shorter",
+    "audio_end_ms",
+    "invalid_value",
+    "response_cancel_not_active",
+    "no active response",
+)
 
 
 def _is_harmless_audio_error(detail: object) -> bool:
@@ -452,8 +480,17 @@ def _is_harmless_audio_error(detail: object) -> bool:
     return any(marker in text for marker in _HARMLESS_AUDIO_ERRORS)
 
 
-async def _interrupt(session) -> None:
-    """Barge-in. Never let a truncate race surface as a session error."""
+async def _interrupt(session, responding: threading.Event) -> None:
+    """Barge-in, but only into something that is actually running.
+
+    Cancelling when no response is active is what produces
+    ``response_cancel_not_active``; the flag is the cheap way to not ask. The
+    try/except is still needed because the response can end between the check
+    and the call — that race is unavoidable from here and is swallowed.
+    """
+    if not responding.is_set():
+        log.debug("push-to-talk with nothing to interrupt — not cancelling")
+        return
     try:
         await session.interrupt()
     except Exception as exc:

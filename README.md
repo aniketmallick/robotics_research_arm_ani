@@ -114,9 +114,20 @@ spacebar; use `--text` if that is unavailable.
 
 `look` is the scene survey — "what's on the table?" — and is **read-only**, the
 same safety class as `get_status`: no motion, no gate, works in `--no-motion`.
-It spends **one** Gemini call for the whole catalog, not one per object, because
-the free tier is 20 requests/day/model. Objects it recognises but that aren't on
-a marked spot come back with `"spot": null` rather than being dropped or guessed.
+
+It is **open-vocabulary**: one `eyes.describe_scene` call that names whatever is
+actually there, *not* a lookup against `OBJECT_CATALOG`. The catalog is what the
+arm has been taught to **pick**, not the limit of what it can **see** — a
+catalog-only survey reports a table holding a bottle, a wooden block and a plate
+as empty, which is worse than useless. The persona rule is matched to it: for any
+question about what's on the table, it must call `look` and answer only from what
+comes back.
+
+The trade is that there are no coordinates, so no marked-spot context. Position
+is still available where it matters: `pick` locates a single named object
+open-vocabulary and assigns it to a zone itself. So "look → *wooden block* →
+pick the wooden block" works end to end even though nothing in that sentence is
+in the catalog.
 
 **It opens with a fixed line.** `config.GREETING_LINE` is spoken verbatim at
 session start (voice, `--text` and `--no-motion` alike), followed by one sentence

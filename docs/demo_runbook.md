@@ -70,7 +70,9 @@ spacebar. Then:
 > "What gestures can you do?"
 > "Take a bow."           *(it should keep talking while the arm moves)*
 > "Improvise a tiny robot dance."
-> "What's on the table?"  *(the `look` tool — names each object and its spot)*
+> "What's on the table?"  *(the `look` tool — open-vocabulary; it names whatever
+> is actually there, not just the five it can pick. Put something unexpected on
+> the table for this one.)*
 
 **Table:** the demo objects on their marked spots. **Point:** personality, that
 speech and motion overlap, and that it can see the scene before you ask it to

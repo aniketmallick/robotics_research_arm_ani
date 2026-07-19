@@ -71,8 +71,10 @@ Hard rules you never break:
 - When an action finishes, react in ONE short line, max — a quick quip, then
   stop. Never narrate or explain what you just did.
 
-- You can look at the whole table and say what's on it and where (the look tool).
-  Only name objects you actually detect; never guess.
+- For ANY question about what's on the table or whether you can see something,
+  you MUST call the look tool and answer ONLY from what it returns. Never claim
+  or deny an object without looking first. It sees anything, not just the things
+  you can pick — so if it reports a wooden log, there is a wooden log.
 
 Picking things up:
 - Say you're looking, then call `pick` with what they asked for. Looking takes a
@@ -546,38 +548,34 @@ def _pick_summary(result) -> dict:
 
 
 def survey_table() -> dict:
-    """What is on the table, and which marked spot each thing is on.
+    """What is actually on the table, in the model's own words.
 
-    ONE Gemini call for the whole catalog rather than one per object — the free
-    tier is 20 requests/day/model and a scene survey is not worth five of them.
+    OPEN VOCABULARY: one ``eyes.describe_scene`` call, not a lookup against
+    OBJECT_CATALOG. It reports a wooden log as a wooden log rather than as
+    nothing, which is the whole point — the catalog is what the arm has been
+    TAUGHT to pick, not the limit of what it can see.
+
+    The trade is that there are no coordinates here, so no marked-spot context.
+    Position is still available where it matters: ``pick`` locates a single
+    named object open-vocabulary and assigns it to a zone itself.
 
     Blocking (camera + network), so callers run it off the event loop. Never
     raises: a vision failure comes back as an empty list with a note, so the
-    robot says "I can't see right now" instead of a tool error.
+    robot says "I can't see right now" instead of the model reading a tool error.
     """
-    from armani import eyes, zones
+    from armani import eyes
 
     try:
-        frame = eyes.capture_frame()
-        detections = eyes.list_visible(list(config.OBJECT_CATALOG), frame=frame)
+        names = eyes.describe_scene()
     except Exception as exc:
+        # describe_scene already swallows its own failures; this is the belt to
+        # its braces, because a tool that raises is a stack trace on stage.
         log.warning("look failed: %s", exc)
         return {"objects": [], "count": 0, "note": f"my eyes aren't working right now: {exc}"}
 
-    zone_set = zones.load_zones()
-    objects: list[dict] = []
-    for detection in detections:
-        spot: str | None = None
-        # Pixel positions only mean something at the size the zones were clicked
-        # at; comparing across sizes would report confident, wrong locations.
-        if zone_set is not None and detection.frame_size == zone_set.frame_size:
-            match = zones.assign_pixel(detection.point, zone_set)
-            spot = None if match.zone is None else match.zone.label
-        objects.append({"name": detection.label, "spot": spot})
-
-    payload: dict = {"objects": objects, "count": len(objects)}
-    if not objects:
-        payload["note"] = "I can't see any of my objects on the table."
+    payload: dict = {"objects": names, "count": len(names)}
+    if not names:
+        payload["note"] = "I can't see anything on the table right now."
     log_event("tool_look", **payload)
     return payload
 
@@ -692,11 +690,14 @@ def build_tools(worker: MotionWorker) -> list:
 
     @function_tool
     async def look() -> dict:
-        """Look at the whole table and report every object you can see and where it is.
+        """Look at the table and report every object you can actually see.
 
-        Use this for "what's on the table?", "what do you see?", "list the
-        objects", or before picking something when you are not sure it is there.
-        Read-only: it looks, it never moves the arm.
+        For ANY question about what is on the table or whether you can see
+        something, you MUST call this and answer ONLY from what it returns.
+        Never claim or deny an object without looking first.
+
+        Sees anything, not just the objects you can pick. Read-only: it looks,
+        it never moves the arm.
         """
         # Read-only, like get_status: no motion, no gate, so it works in
         # NO-MOTION mode too. Off the event loop because it is a camera read
