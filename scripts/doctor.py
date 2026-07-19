@@ -75,6 +75,12 @@ CHECKS: tuple[Check, ...] = (
         False,
         "nothing in dry-run — the live pick needs zones, macros and the operator (--live)",
     ),
+    Check(
+        "smoke_12_gates.py",
+        "Trust gates G1-G5 (scripted)",
+        False,
+        "nothing in dry-run — six scripted gate scenarios including the stand-down",
+    ),
 )
 
 # Tests that move the arm. --skip-motion skips exactly these, so adding a moving

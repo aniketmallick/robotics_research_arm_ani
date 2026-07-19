@@ -55,17 +55,30 @@ How you talk:
 Hard rules you never break:
 - You control a physical arm through your tools. ALWAYS announce a movement in
   words BEFORE you call the tool that starts it ("Alright, bowing now.").
-- You have NO eyes yet — no camera, no vision. If asked to look at, find, or pick
-  up a specific object, say plainly that your eyes arrive in the next build; do
-  not pretend to see anything.
 - Never claim an ability you don't have. Your real abilities are exactly your
-  tools: named gesture macros, improvised moves, going home, reporting status,
-  and stopping. Nothing else.
+  tools: named gesture macros, improvised moves, picking up an object you can
+  see, going home, reporting status, and stopping. Nothing else.
 - When a tool comes back busy, refused, or with an error, own it out loud and
   move on — don't invent success. If a gesture isn't in your list, say so and
   offer one that is.
 - Your moves take a few seconds. Once you've started one, keep talking naturally
   while it runs; you'll be told when it finishes.
+
+Picking things up:
+- Say you're looking, then call `pick` with what they asked for. Looking takes a
+  couple of seconds.
+- `pick` decides everything about safety itself. You do not. Your job is to say
+  what it tells you and pass back what the human answers.
+- If it returns `need_clarification`, ask the human that exact question in your
+  own voice, then call `answer_pick` with what they say back.
+- If it returns `needs_approval`, tell them the confidence number it gave you and
+  ask if you should go for it, then call `approve_pick` with yes or no. You may
+  be funny about a low number ("34%, that's a coin toss") — but never round it
+  up, talk it up, or pretend it was higher.
+- If it refuses, say why, plainly. "I can't see it" and "I'm not sure which one"
+  and "nobody answered, so I stood down" are all good, honest answers.
+- After a pick you'll be told whether you actually got it. If you didn't, SAY SO.
+  Never announce a success you weren't told about.
 """
 
 
@@ -235,6 +248,201 @@ class MotionWorker:
             self._queue.task_done()
 
 
+# --- Gated pick: the return-to-model dialogue pattern --------------------
+#
+# The realtime session owns the audio, so a gate that needs a human answer
+# cannot block and listen. Instead the pipeline runs on its own thread and
+# PAUSES at each gate that needs input; the tool returns a status the model
+# SPEAKS, the human replies by voice, and answer_pick/approve_pick hand the
+# reply back to the waiting gate.
+#
+# What does NOT change: gates.run_gated_pick is the same code the console smoke
+# test runs, the resolving is still done in Python, and the 10-second
+# stand-down is still gates.py's own deadline. The model is a mouth and a pair
+# of ears here — it cannot approve, resolve, or skip anything.
+
+
+class PendingPick:
+    """One gated pick in flight, driven from the model's conversational turns."""
+
+    def __init__(self, worker: MotionWorker, object_name: str, *, verify_vlm: bool = True) -> None:
+        self.object_name = object_name
+        self.worker = worker
+        self.verify_vlm = verify_vlm
+        self.result: object | None = None
+        # Filled in by gates.py the moment G4 computes it, so the tool can put
+        # the real number in front of the model instead of scraping the prompt.
+        self._confidence: float = 0.0
+
+        # Events the tools report to the model, one at a time.
+        self._events: queue.Queue[dict] = queue.Queue()
+        # The human's reply, handed to whichever gate is waiting.
+        self._reply: queue.Queue[object] = queue.Queue(maxsize=1)
+        self._finished = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="gated-pick", daemon=True)
+
+    # -- lifecycle --
+    def start(self) -> None:
+        self._thread.start()
+
+    @property
+    def finished(self) -> bool:
+        return self._finished.is_set()
+
+    def next_event(self, timeout: float) -> dict:
+        """The next thing the model should say, or a timeout refusal."""
+        try:
+            return self._events.get(timeout=timeout)
+        except queue.Empty:
+            return {
+                "status": "error",
+                "error": "the pick is taking too long; I've let it go",
+            }
+
+    def reply(self, value: object) -> bool:
+        """Hand the human's answer to the gate that is waiting for it."""
+        try:
+            self._reply.put_nowait(value)
+            return True
+        except queue.Full:
+            return False
+
+    # -- the injected gate callables (run on the pick thread) --
+    def _clarify(self, question: str, options: list[str]) -> str | None:
+        self._events.put({
+            "status": "need_clarification",
+            "question": question,
+            "options": options,
+        })
+        # No timeout here: gates.py imposes its own deadline on this call, so
+        # adding a second one would just mean two clocks disagreeing.
+        return self._await_reply()
+
+    def _approve(self, prompt: str, timeout_s: float) -> bool:
+        self._events.put({
+            "status": "needs_approval",
+            "prompt": prompt,
+            "confidence": self._confidence,
+            "timeout_s": timeout_s,
+        })
+        return bool(self._await_reply())
+
+    def _await_reply(self):
+        """Block the pick thread until a tool hands an answer back.
+
+        Waits forever on purpose. gates._ask_with_deadline runs this call with
+        the real deadline and abandons it on timeout, so a human who never
+        answers produces a stand-down there — one clock, in the safety layer.
+        """
+        return self._reply.get()
+
+    def _perform(self, zone) -> object:
+        """Run the macro on the motion worker — the sole owner of the bus."""
+        from armani import gates, pick
+
+        box: dict = {}
+        done = threading.Event()
+
+        def run(arm) -> None:
+            try:
+                box["completed"] = pick.play_pick(arm, zone)
+                # Read the gripper HERE, on the worker thread: it is a serial-bus
+                # read, and the verification half runs on the pick thread.
+                box["gripper"] = pick.read_gripper(arm)
+            finally:
+                done.set()
+
+        try:
+            macro = pick.load_pick(zone)
+            eta = macro.seconds + config.GESTURE_PREPOSITION_S
+        except Exception as exc:
+            return gates.PerformOutcome(False, f"the taught pick wouldn't load: {exc}", moved=False)
+
+        submitted = self.worker.submit(
+            MotionJob(description=f"pick from {zone.label}", run=run, eta_s=eta)
+        )
+        if submitted.get("status") != "started":
+            return gates.PerformOutcome(
+                False,
+                submitted.get("reason") or f"the arm is {submitted.get('status')}",
+                moved=False,
+            )
+
+        # Motion is under way: let the model start talking about it now.
+        self._events.put({
+            "status": "started",
+            "action": f"pick from {zone.label}",
+            "zone": zone.label,
+            "confidence": self._confidence,
+            "eta_s": round(eta, 1),
+        })
+
+        if not done.wait(timeout=eta + config.AGENT_PICK_MACRO_GRACE_S):
+            return gates.PerformOutcome(False, "the pick did not finish in time")
+        return gates.PerformOutcome(
+            completed=bool(box.get("completed")),
+            detail="" if box.get("completed") else "the pick was stopped before it finished",
+            gripper_percent=box.get("gripper"),
+        )
+
+    # -- the pipeline thread --
+    def _note_confidence(self, confidence: float) -> None:
+        self._confidence = confidence
+
+    def _run(self) -> None:
+        from armani import gates
+
+        try:
+            result = gates.run_gated_pick(
+                self.worker.arm,
+                self.object_name,
+                clarify=self._clarify,
+                approve=self._approve,
+                perform=self._perform,
+                verify_vlm=self.verify_vlm,
+                on_confidence=self._note_confidence,
+            )
+        except Exception as exc:
+            log.error("gated pick blew up: %s", exc)
+            result = None
+            self._events.put({"status": "error", "error": f"{type(exc).__name__}: {exc}"})
+        else:
+            self.result = result
+            self._events.put(_pick_summary(result))
+            # Announce the outcome through the same channel finished gestures
+            # use, so the model comments on it naturally — including failure.
+            self.worker.completions.put(
+                Completion(
+                    action=f"pick {self.object_name}",
+                    status="done" if result.ok else "failed",
+                    detail=result.speak(),
+                )
+            )
+        finally:
+            self._finished.set()
+
+
+def _pick_summary(result) -> dict:
+    """The compact JSON the model sees when a gated pick resolves."""
+    if result.ok:
+        return {
+            "status": "done",
+            "object": result.object,
+            "zone": result.zone_label,
+            "confidence": result.confidence,
+            "verified": True,
+        }
+    return {
+        "status": "refused",
+        "object": result.object,
+        "stopped_at": result.stopped_at,
+        "reason": result.reason,
+        "confidence": result.confidence,
+        "moved": result.moved,
+        "verified": result.verified,
+    }
+
+
 # --- Tools ---------------------------------------------------------------
 #
 # Built as closures over the worker so they need no run-context plumbing. Each
@@ -250,6 +458,10 @@ def _pose_summary(pose: Action | None) -> str:
 
 def build_tools(worker: MotionWorker) -> list:
     """Return the agent's tool list, all bound to ``worker``."""
+
+    # At most one gated pick in flight. A dict rather than a nonlocal so the
+    # three pick tools share it without rebinding gymnastics.
+    _pending: dict[str, PendingPick] = {}
 
     def _refused() -> dict:
         return {"status": "refused", "reason": "motion not enabled"}
@@ -366,7 +578,80 @@ def build_tools(worker: MotionWorker) -> list:
         """Immediately stop the current movement and hold position."""
         return worker.request_stop_llm()
 
-    return [list_gestures, play_gesture, improvise_move, go_home, get_status, stop_motion]
+    # --- the gated pick ---------------------------------------------------
+    # These three are a conversation, not three separate abilities: pick starts
+    # the pipeline, and answer_pick / approve_pick feed a waiting gate. Every
+    # safety decision is made in gates.py; nothing the model returns here can
+    # move the arm past a gate.
+
+    @function_tool
+    async def pick(object_name: str) -> dict:
+        """Look for a named object and, if it is safe to, pick it up.
+
+        Runs the trust gates: it may come back asking you to clarify which
+        object was meant, or asking for approval when it is not confident.
+
+        Args:
+            object_name: What to pick up, e.g. "red block" or "black cup".
+        """
+        object_name = (object_name or "").strip()
+        log_event("tool_pick", object=object_name)
+        if not object_name:
+            return {"status": "error", "error": "tell me what to pick up"}
+        if not worker.motion_enabled:
+            return _refused()
+
+        pending = _pending.get("pick")
+        if pending is not None and not pending.finished:
+            return {
+                "status": "busy",
+                "doing": f"still working out the {pending.object_name}",
+            }
+
+        pending = PendingPick(worker, object_name)
+        _pending["pick"] = pending
+        pending.start()
+        # Off the event loop: the pipeline's first step is a vision call.
+        return await asyncio.to_thread(pending.next_event, config.AGENT_PICK_EVENT_TIMEOUT_S)
+
+    @function_tool
+    async def answer_pick(answer: str) -> dict:
+        """Relay the human's answer to a clarifying question about a pick.
+
+        Args:
+            answer: What the human said, in their own words, e.g. "the left one".
+        """
+        log_event("tool_answer_pick", answer=answer)
+        pending = _pending.get("pick")
+        if pending is None or pending.finished:
+            return {"status": "error", "error": "nothing is waiting on an answer"}
+        if not pending.reply(answer or ""):
+            return {"status": "error", "error": "I wasn't waiting for that"}
+        return await asyncio.to_thread(pending.next_event, config.AGENT_PICK_EVENT_TIMEOUT_S)
+
+    @function_tool
+    async def approve_pick(approved: bool) -> dict:
+        """Relay the human's yes or no to a request for approval.
+
+        Args:
+            approved: True if the human said go ahead, False otherwise.
+        """
+        log_event("tool_approve_pick", approved=bool(approved))
+        pending = _pending.get("pick")
+        if pending is None or pending.finished:
+            # Almost always the 10-second stand-down having already fired.
+            return {
+                "status": "error",
+                "error": "there's no pick waiting on approval — it may have already stood down",
+            }
+        if not pending.reply(bool(approved)):
+            return {"status": "error", "error": "I wasn't waiting for that"}
+        return await asyncio.to_thread(pending.next_event, config.AGENT_PICK_EVENT_TIMEOUT_S)
+
+    return [
+        list_gestures, play_gesture, improvise_move, go_home, get_status, stop_motion,
+        pick, answer_pick, approve_pick,
+    ]
 
 
 # --- Agent + session builders -------------------------------------------

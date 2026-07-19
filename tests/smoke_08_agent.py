@@ -20,7 +20,13 @@ from _bootstrap import banner, fail, ok, parse_args, skip  # isort: skip
 from armani import agent, config, motion  # noqa: E402
 from armani.logutil import log_event  # noqa: E402
 
-EXPECTED_TOOLS = {"list_gestures", "play_gesture", "improvise_move", "go_home", "get_status", "stop_motion"}
+EXPECTED_TOOLS = {
+    # stage 3
+    "list_gestures", "play_gesture", "improvise_move", "go_home", "get_status", "stop_motion",
+    # stage 6 — the gated pick is a conversation, not one call: `pick` starts the
+    # pipeline and the other two feed a gate that is waiting on a human answer.
+    "pick", "answer_pick", "approve_pick",
+}
 
 
 def _tool_names(tools: list) -> set[str]:

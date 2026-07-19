@@ -340,6 +340,7 @@ def _ask(frame_jpeg: bytes, prompt: str) -> tuple[str, str]:
     )
 
     errors: list[str] = []
+    quota_hit = False
     for model in config.GEMINI_MODELS:
         for settings in attempts:
             try:
@@ -349,8 +350,16 @@ def _ask(frame_jpeg: bytes, prompt: str) -> tuple[str, str]:
                     config=types.GenerateContentConfig(**settings),
                 )
             except Exception as exc:
-                errors.append(f"{model}: {type(exc).__name__}: {exc}")
-                log.warning("gemini model %s failed: %s", model, exc)
+                errors.append(f"{model}: {_short_error(exc)}")
+                log.warning("gemini model %s failed: %s", model, _short_error(exc))
+                if _is_quota_error(exc):
+                    # Retrying the same model with different settings cannot fix
+                    # a spent quota, and burning attempts against a rate limit is
+                    # how a demo turns a slow API into no API at all.
+                    quota_hit = True
+                    break
+                if not _looks_like_bad_settings(exc):
+                    break  # the model is unhappy about something else; move on
                 continue
             text = (response.text or "").strip()
             if not text:
@@ -358,7 +367,40 @@ def _ask(frame_jpeg: bytes, prompt: str) -> tuple[str, str]:
                 continue
             return model, text
 
-    raise EyesError("every Gemini model failed:\n  " + "\n  ".join(errors))
+    if quota_hit:
+        raise EyesError(
+            "Gemini quota is exhausted. The free tier allows only 20 requests per day "
+            "PER MODEL, and one gated pick spends three or four. Enable billing on the "
+            "Google API key before the demo — see docs/env_report.md."
+        )
+    raise EyesError("every Gemini model failed: " + "; ".join(errors))
+
+
+# Aggregated model errors end up in VerifyResult.reason and from there in the
+# decision log. A single 429 from google-genai is ~1.5 kB of JSON, so six of them
+# would bury one log line under 9 kB and make the stage-7 dashboard unreadable.
+MAX_ERROR_CHARS = 160
+
+
+def _short_error(exc: Exception) -> str:
+    text = " ".join(str(exc).split())
+    if len(text) > MAX_ERROR_CHARS:
+        text = text[:MAX_ERROR_CHARS] + "..."
+    return f"{type(exc).__name__}: {text}"
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    text = str(exc)
+    return "RESOURCE_EXHAUSTED" in text or "429" in text
+
+
+def _looks_like_bad_settings(exc: Exception) -> bool:
+    """Is this the model rejecting our config, rather than a real failure?
+
+    Only then is it worth re-asking the same model without ThinkingConfig.
+    """
+    text = str(exc).lower()
+    return any(word in text for word in ("thinking", "unsupported", "invalid argument", "not supported"))
 
 
 # --- Scoring -------------------------------------------------------------
@@ -531,6 +573,85 @@ def list_visible(candidates: list[str], frame=None) -> list[Detection]:
         detections=[d.as_log() for d in detections],
     )
     return detections
+
+
+# --- Grasp verification (trust gate G5) ----------------------------------
+
+
+@dataclass(frozen=True)
+class HeldCheck:
+    """Did the arm actually end up holding the thing? The VLM's opinion."""
+
+    held: bool | None  # None = the model would not commit
+    confidence: float
+    reason: str
+    raw: str = ""
+    model: str = ""
+
+    def as_log(self) -> dict[str, object]:
+        return {
+            "vlm_held": self.held,
+            "vlm_confidence": round(self.confidence, 3),
+            "vlm_reason": self.reason,
+            "vlm_model": self.model,
+        }
+
+
+HELD_PROMPT = (
+    "Look at this robot arm and table. The robot just tried to pick up the {object}.\n"
+    "Two things decide the answer: is the {object} held in the robot's gripper, and is it "
+    "gone from the spot on the table where it was sitting?\n"
+    'Reply with JSON only: {"held": true or false, "confidence": 0.0 to 1.0, '
+    '"reason": "one short sentence"}.\n'
+    "Answer held=false if the gripper is empty or the object is still on the table. "
+    "Be strict: if you cannot tell, say so in the reason and give a low confidence."
+)
+
+
+def confirm_held(object_name: str, frame=None) -> HeldCheck:
+    """Ask Gemini whether the named object ended up in the gripper.
+
+    This is the real G5 check. It never raises: verification runs while the arm
+    may be holding something, so a network failure must come back as "I could
+    not tell" rather than as an exception in the middle of a grasp.
+    """
+    object_name = (object_name or "").strip() or "object"
+    try:
+        if frame is None:
+            frame = capture_frame()
+        model, raw = _ask(encode_jpeg(frame), HELD_PROMPT.replace("{object}", object_name))
+    except Exception as exc:
+        return HeldCheck(None, 0.0, f"could not run the visual check: {exc}")
+
+    try:
+        payload = _extract_json(raw)
+    except ValueError as exc:
+        return HeldCheck(None, 0.0, f"unreadable reply: {exc}", raw=raw, model=model)
+
+    # The prompt asks for an object; a model that wraps it in a list is not wrong
+    # enough to throw away.
+    if isinstance(payload, list):
+        payload = payload[0] if payload else {}
+    if not isinstance(payload, dict):
+        return HeldCheck(None, 0.0, f"expected a JSON object, got {type(payload).__name__}",
+                         raw=raw, model=model)
+
+    held = payload.get("held")
+    if not isinstance(held, bool):
+        held = None
+
+    try:
+        confidence = float(payload.get("confidence"))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if not math.isfinite(confidence):
+        confidence = 0.0
+    confidence = min(max(confidence, 0.0), 1.0)
+
+    reason = str(payload.get("reason") or "").strip() or "no reason given"
+    check = HeldCheck(held=held, confidence=confidence, reason=reason, raw=raw, model=model)
+    log_event("eyes_confirm_held", object=object_name, **check.as_log())
+    return check
 
 
 def annotate(frame, detections: list[Detection]):

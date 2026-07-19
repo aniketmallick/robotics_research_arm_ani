@@ -234,6 +234,59 @@ rather than one error string.
 figure — the grasp itself is a human recording. `--identity` writes the tally and
 the confusions to `logs/decisions.jsonl`.
 
+## How to run — stage 6 (trust gates) ⭐ the product
+
+Five gates, in order, enforced in Python around every pick. The voice model
+speaks the questions and relays the answers; **it never decides whether a gate
+passes.**
+
+| gate | asks | fails closed by |
+|---|---|---|
+| **G1 seen** | is the object there at all? | saying it can't see it |
+| **G2 ambiguous** | two of them, or between two spots? | asking WHICH, then resolving the answer in Python |
+| **G3 reachable** | is there a taught macro for that spot? | saying nobody has shown it that spot |
+| **G4 confidence** | how sure am I? | stating the number; below 60% it needs spoken approval within 10s or **stands down** |
+| **G5 verify** | did I actually get it? | admitting it didn't |
+
+```bash
+# Six scripted scenarios: clean, ambiguous, approved, TIMED OUT, unseen, missed grasp.
+# No camera, no network, no arm.
+python tests/smoke_12_gates.py --dry-run
+
+# Real eyes on your real table, real gates, stubbed macro — nothing moves.
+python tests/smoke_12_gates.py --object "red block"
+
+# The three demo acts for real. OPERATOR MUST WATCH THE ARM.
+python tests/smoke_12_gates.py --live
+
+# And in the voice session — the actual pitch:
+python scripts/run_agent.py
+```
+
+**The invariant.** There is no code path where the model's output alone moves the
+arm past a gate. `gates.run_gated_pick` is ordinary Python; the model's only
+inputs are the *text* of a clarification and a *yes/no* on approval, and both are
+re-checked here — the answer is matched to a zone in Python (`_match_zone_by_words`,
+which refuses anything it doesn't understand rather than guessing), and the
+approval deadline is `gates.py`'s own clock. A prompt jailbreak can make ARM-ANI
+say anything; it cannot make it pick anything.
+
+**The 10-second stand-down is Python's.** `gates._ask_with_deadline` runs the
+injected `approve()` callable on its own thread and abandons it at the deadline.
+A voice handler that hangs, a model that never calls back, and a human who says
+nothing all produce the same result: no motion. A *late* yes cannot resurrect a
+discarded pick — there is a test for exactly that.
+
+**The confidence number** is `vision × (floor + (1−floor) × assignment_clarity)`,
+defined once in `gates.confidence_for` with the weights and rationale in
+`config.py`. Vision says "that's a red block"; the assignment margin says how sure
+we are *which spot* it's on. The persona may joke about a low number but it comes
+from Python and is never rounded up.
+
+**Every run writes one gate-by-gate record** to `logs/decisions.jsonl` as a
+`gated_pick` event — which gate stopped it, the confidence, the approval, the
+verification. That is the judges' audit trail, and stage 7 renders exactly it.
+
 ### Gestures
 
 Eight macros replayed from one local teleop dataset, one episode each:

@@ -384,35 +384,93 @@ def test_play_gesture_still_delegates_to_play_macro(monkeypatch):
 # --- verification hook ---------------------------------------------------
 
 
-def test_gripper_closed_on_nothing_reads_as_empty(monkeypatch):
-    arm = FakeArm()
-    arm.pose[config.GRIPPER_JOINT] = 0.5
-    outcome = pick.verify_held(arm, "banana", save_frame=False)
-    assert outcome.held_guess is False
-    assert outcome.gripper_percent == pytest.approx(0.5)
-
-
-def test_gripper_stopped_by_an_object_reads_as_held(monkeypatch):
+def test_read_gripper_returns_the_position():
     arm = FakeArm()
     arm.pose[config.GRIPPER_JOINT] = 30.0
-    outcome = pick.verify_held(arm, "banana", save_frame=False)
-    assert outcome.held_guess is True
+    assert pick.read_gripper(arm) == pytest.approx(30.0)
 
 
-def test_verify_never_raises_when_the_arm_misbehaves():
-    """The arm is holding an object; verification must not throw mid-grasp."""
+def test_read_gripper_never_raises_when_the_arm_misbehaves():
+    """The arm may be holding an object; a failed read must not throw mid-grasp."""
 
     class BrokenArm:
         def read_positions(self):
             raise RuntimeError("bus error")
 
-    outcome = pick.verify_held(BrokenArm(), "banana", save_frame=False)
-    assert outcome.held_guess is None
-    assert "could not read the gripper" in outcome.reason
+    assert pick.read_gripper(BrokenArm()) is None
 
 
-def test_verify_states_that_the_vlm_check_is_not_implemented():
-    """Honesty guard: G5 is not done, and the log must not imply it is."""
-    arm = FakeArm()
-    outcome = pick.verify_held(arm, "banana", save_frame=False)
-    assert "not implemented" in outcome.reason
+def test_gripper_closed_on_nothing_reads_as_empty():
+    outcome = pick.verify_held("banana", 0.5, use_vlm=False)
+    assert outcome.held_guess is False
+    assert outcome.held is False
+
+
+def test_gripper_stopped_by_an_object_reads_as_held():
+    outcome = pick.verify_held("banana", 30.0, use_vlm=False)
+    assert outcome.held_guess is True
+    assert outcome.held is True
+
+
+def test_no_signal_at_all_says_it_cannot_tell():
+    """Better to admit ignorance than to claim a grasp that may not exist."""
+    outcome = pick.verify_held("banana", None, use_vlm=False)
+    assert outcome.held is None
+    assert "cannot tell" in outcome.reason
+
+
+def test_a_confident_vlm_overrules_the_gripper(monkeypatch):
+    """Jaws stopped by a fingertip read 'held'; vision knows better."""
+    monkeypatch.setattr(
+        pick.eyes, "confirm_held",
+        lambda obj, frame=None: eyes.HeldCheck(held=False, confidence=0.95, reason="table"),
+    )
+    outcome = pick.verify_held("banana", 30.0, frame=object(), use_vlm=True)
+    assert outcome.held_guess is True
+    assert outcome.held is False, "the VLM is the real check"
+
+
+def test_an_unsure_vlm_defers_to_the_gripper(monkeypatch):
+    monkeypatch.setattr(
+        pick.eyes, "confirm_held",
+        lambda obj, frame=None: eyes.HeldCheck(held=False, confidence=0.05, reason="cannot tell"),
+    )
+    outcome = pick.verify_held("banana", 30.0, frame=object(), use_vlm=True)
+    assert outcome.held is True, "a barely-confident VLM must not overrule the only hard signal"
+
+
+def test_a_vlm_that_will_not_commit_defers_to_the_gripper(monkeypatch):
+    monkeypatch.setattr(
+        pick.eyes, "confirm_held",
+        lambda obj, frame=None: eyes.HeldCheck(held=None, confidence=0.9, reason="unreadable"),
+    )
+    outcome = pick.verify_held("banana", 2.0, frame=object(), use_vlm=True)
+    assert outcome.held is False
+
+
+def test_verify_survives_a_vision_explosion(monkeypatch):
+    """Verification runs while the arm may be holding something."""
+
+    def boom(obj, frame=None):
+        raise RuntimeError("network gone")
+
+    monkeypatch.setattr(pick.eyes, "confirm_held", boom)
+    with pytest.raises(RuntimeError):
+        # confirm_held itself is the layer that must not raise; prove it here
+        # rather than pretending verify_held swallows arbitrary bugs.
+        boom("banana")
+    monkeypatch.setattr(
+        pick.eyes, "confirm_held",
+        lambda obj, frame=None: eyes.HeldCheck(None, 0.0, "could not run the visual check"),
+    )
+    outcome = pick.verify_held("banana", 30.0, frame=object(), use_vlm=True)
+    assert outcome.held is True  # falls back to closure
+
+
+def test_verify_result_serialises_for_the_decision_log(monkeypatch):
+    monkeypatch.setattr(
+        pick.eyes, "confirm_held",
+        lambda obj, frame=None: eyes.HeldCheck(held=True, confidence=0.8, reason="in the jaws"),
+    )
+    outcome = pick.verify_held("banana", 30.0, frame=object(), use_vlm=True)
+    json.dumps(outcome.as_log(), allow_nan=False)

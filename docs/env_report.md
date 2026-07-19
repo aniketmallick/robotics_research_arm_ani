@@ -381,3 +381,71 @@ give *pixel* accuracy — the *robot* coordinates come from the operator measuri
 board sits, so a 5 mm ruler slip shifts the entire map 5 mm. The gripper-tip method needs
 no ruler at all: forward kinematics supplies exact robot coordinates and the robot
 effectively measures itself. If the first hover is visibly off, try `--method tip`.
+
+---
+
+# Stage 6 findings — trust gates
+
+## BLOCKER FOR DEMO DAY: the Gemini free tier is 20 requests/day/model
+
+Hit while testing G5 on 2026-07-19. Every model in `config.GEMINI_MODELS` returned
+`429 RESOURCE_EXHAUSTED`, and it was **still** exhausted 75 seconds later — this is
+the **per-day** quota (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`,
+`quotaValue: 20`), not a per-minute burst limit.
+
+What one gated pick costs:
+
+| call | when | requests |
+|---|---|---|
+| `eyes.locate` | G1, every pick | 2 (`EYES_SAMPLES`, two prompt variants) |
+| `eyes.list_visible` | G2, only when ambiguous | 1 |
+| `eyes.confirm_held` | G5, every completed pick | 1 |
+
+So **3 requests for a clean pick, 4 for an ambiguous one** — roughly **five to six
+picks per day** on the free tier, across rehearsal AND the demo itself.
+
+**Operator action before the venue: enable billing on the Google API key.** This
+is not optional. There is no code change that fixes it; the gates degrade
+gracefully (G5 falls back to the gripper reading and says "vision would not
+commit") but G1 failing means no pick can start at all.
+
+Also fixed while finding this: `eyes._ask` used to retry every model twice (once
+with `ThinkingConfig`, once without), so a rate-limited call burned **six**
+requests instead of three. It now only re-asks the same model when the error
+actually looks like a rejected config, and stops immediately on a quota error.
+
+## Zone geometry vs the ambiguity margin
+
+The operator's five zones are spaced 104–215 px apart, the closest pair being
+z2–z3 at 104 px. For two spots `D` apart, an object `d` from the nearer one has
+margin `D − 2d`, so staying above `ASSIGNMENT_MARGIN_PX` needs:
+
+    d <= (D - margin) / 2
+
+| margin | clear radius at D=104 px |
+|---|---|
+| 60 (default) | 22 px |
+| 50 | 27 px |
+| 40 | 32 px |
+
+So at the default, Gemini's point must land within **22 px** of the clicked
+centre for the pick to read unambiguous. That is tight — the click is the centre
+of the *mark*, while Gemini points at the centre of the *object*, and those differ
+by more than 22 px for anything larger than a marker pen.
+
+**This is a tuning dial, not a bug**: firing G2 too often makes the robot ask
+"which one?" when it did not need to, which is annoying but safe. If the demo
+asks too often, lower `ARMANI_ASSIGNMENT_MARGIN_PX` to 40. Measure with
+`smoke_11_pick.py --identity` before changing it.
+
+## Confidence in practice
+
+`confidence = vision × (0.5 + 0.5 × clamp(margin/120, 0, 1))`. Consequences worth
+knowing before tuning `CONF_APPROVAL = 0.60`:
+
+- A dead-centre object on a well-spaced spot keeps its full vision confidence.
+- An object exactly on the 60 px ambiguity threshold is multiplied by 0.75.
+- The *maximum* achievable confidence equals the vision confidence, which for a
+  clear object has measured around 0.83–0.95 in stage 4/5 runs. A vision score
+  below ~0.60 can therefore never clear G4 no matter how clean the assignment —
+  which is the intended fail-closed direction.

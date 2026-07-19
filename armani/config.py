@@ -503,9 +503,37 @@ IMPROVISE_MAX_TOTAL_SECONDS = 15.0
 IMPROVISE_MAX_RETRIES = 1
 IMPROVISE_MAX_TOKENS = 1024
 
-# --- Trust gate thresholds ----------------------------------------------
-CONF_APPROVAL = 0.60
-APPROVAL_TIMEOUT_S = 10
+# --- Trust gate thresholds (stage 6) -------------------------------------
+# G4's line. At or above this ARM-ANI states the number and proceeds; below it
+# it states the number and must get spoken approval first.
+CONF_APPROVAL = float(os.getenv("ARMANI_CONF_APPROVAL") or 0.60)
+
+# G4's fail-closed deadline. If no approval arrives within this many seconds the
+# pending pick is DISCARDED and the arm does not move. Enforced by gates.py
+# itself with its own clock — never by trusting the model to count, and never by
+# trusting the injected approve() callable to honour its own timeout.
+APPROVAL_TIMEOUT_S = float(os.getenv("ARMANI_APPROVAL_TIMEOUT_S") or 10)
+
+# The confidence number, defined in ONE place (gates.confidence_for).
+#
+#   confidence = vision_confidence * (FLOOR + (1 - FLOOR) * assignment_clarity)
+#   assignment_clarity = clamp(margin_px / CONF_CLEAR_MARGIN_PX, 0, 1)
+#
+# Rationale: vision confidence says "I am sure that is a red block"; it says
+# nothing about WHICH marked spot the block is on. An object barely inside one
+# zone is a shakier pick than the same object dead centre, so the assignment
+# margin tempers the number rather than replacing it. The floor stops a tight
+# assignment from zeroing an otherwise certain detection — being 50 px from two
+# spots is a reason to hesitate, not a reason to disbelieve your eyes.
+CONF_ASSIGNMENT_FLOOR = float(os.getenv("ARMANI_CONF_ASSIGNMENT_FLOOR") or 0.5)
+# Margin at which the assignment counts as completely unambiguous. Twice
+# ASSIGNMENT_MARGIN_PX by default, so an assignment exactly ON the ambiguity
+# threshold earns half the clarity term.
+CONF_CLEAR_MARGIN_PX = float(os.getenv("ARMANI_CONF_CLEAR_MARGIN_PX") or 120.0)
+
+# G5: how sure the VLM must be before "held" is believed either way. Between
+# these the VLM abstains and the gripper reading breaks the tie.
+G5_MIN_CONFIDENCE = float(os.getenv("ARMANI_G5_MIN_CONFIDENCE") or 0.50)
 
 # --- Voice agent (stage 3) ----------------------------------------------
 # Realtime output voice. See RealtimeVoice options in the OpenAI Agents SDK;
@@ -543,6 +571,14 @@ AGENT_MAX_OUTPUT_TOKENS = _env_int("ARMANI_AGENT_MAX_TOKENS") or 1024
 # it can talk for roughly the right length while the arm moves. Gestures carry
 # their own measured length; this is the fallback for improvised moves.
 AGENT_IMPROVISE_ETA_S = 6.0
+
+# How long a pick tool call waits for the pipeline's next event before giving up
+# on it. Generous: G1 alone is two Gemini calls, and a clarification round trip
+# adds the human's thinking time on top.
+AGENT_PICK_EVENT_TIMEOUT_S = float(os.getenv("ARMANI_PICK_EVENT_TIMEOUT_S") or 60.0)
+# Extra headroom over a macro's own length before the pipeline stops waiting for
+# the motion worker to report it finished.
+AGENT_PICK_MACRO_GRACE_S = 20.0
 
 # --- Models --------------------------------------------------------------
 REALTIME_MODEL = "gpt-realtime-2.1"

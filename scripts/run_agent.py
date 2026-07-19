@@ -38,14 +38,28 @@ log = get_logger("run_agent")
 
 CHECKLIST = """\
 Scripted demo checklist (say these out loud, hold space while you talk):
+
+  ACT 1 — personality
   1. "Introduce yourself in one sentence."
   2. "What gestures can you do?"
-  3. "Take a bow."          <- it should TALK WHILE THE ARM MOVES
+  3. "Take a bow."               <- it should TALK WHILE THE ARM MOVES
   4. "Improvise a tiny robot dance."
-  5. "Pick up the red block."  <- it must honestly decline: no eyes yet
-  6. Interrupt it mid-sentence by tapping space (barge-in).
-  7. "Stop" while a gesture is running.
-  8. Ctrl-C to freeze, then [s] to recover.
+
+  ACT 2 — a clean pick (one object, clearly on one marked spot)
+  5. "Pick up the red block."    <- states a confidence number, then picks
+  6. It tells you afterwards whether it actually got it. If it missed, it says so.
+
+  ACT 3 — the trust gates (this is the pitch)
+  7. Two of the same object on two spots -> "pick up the red block"
+     It should ask WHICH ONE. Answer out loud; it resolves and picks.
+  8. One object between two spots -> it asks, and you SAY NOTHING.
+     After 10 seconds it stands down on its own. The arm never moves.
+  9. "Pick up the unicorn."      <- it can't see one, and says so.
+
+  Safety
+ 10. Interrupt it mid-sentence by tapping space (barge-in).
+ 11. "Stop" while a gesture is running.
+ 12. Ctrl-C to freeze, then [s] to recover.
 """
 
 

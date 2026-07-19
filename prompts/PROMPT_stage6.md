@@ -1,6 +1,6 @@
 # STAGE 6 — Trust gates: the product. G1 seen · G2 ambiguous · G3 reachable · G4 confidence+approval+timeout · G5 verify
 
-Re-read `CLAUDE.md`, especially **safety rule 6** (gates live in OUR Python inside the pick path — NEVER in the LLM prompt; the model cannot bypass a gate no matter what it decides) and the trust-gate roadmap. Stage 5 passed: 160 tests, taught-zone pick with four honest refusal paths, `return_home=False` locked. This stage turns those refusals into the interaction that IS the pitch: the robot clarifies, states a confidence number, asks approval when unsure, stands down on silence, and verifies its own grasp.
+Act as a distinguished engineer and Re-read `CLAUDE.md`, especially **safety rule 6** (gates live in OUR Python inside the pick path — NEVER in the LLM prompt; the model cannot bypass a gate no matter what it decides) and the trust-gate roadmap. Stage 5 passed: 160 tests, taught-zone pick with four honest refusal paths, `return_home=False` locked. This stage turns those refusals into the interaction that IS the pitch: the robot clarifies, states a confidence number, asks approval when unsure, stands down on silence, and verifies its own grasp.
 
 **This is the stage the VCs are paying for. Build it to be watched.**
 

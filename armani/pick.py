@@ -37,23 +37,34 @@ RUNBOOK = "docs/recording_picks.md"
 
 @dataclass(frozen=True)
 class VerifyResult:
-    """Did we actually end up holding it? (Partial G5 — completed in stage 6.)"""
+    """Did we actually end up holding it? Trust gate G5.
+
+    Two independent signals. The VLM is the real check and wins; the gripper
+    reading is a cheap tie-breaker for when the model will not commit.
+    """
 
     gripper_percent: float | None = None
     # Weak secondary signal only: jaws that closed on nothing sit near 0.
     held_guess: bool | None = None
+    # The VLM's verdict, and the fused answer the robot actually announces.
+    vlm: eyes.HeldCheck | None = None
+    held: bool | None = None
     frame_path: str | None = None
     reason: str = ""
 
     def as_log(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "gripper_percent": (
                 None if self.gripper_percent is None else round(self.gripper_percent, 1)
             ),
             "held_guess": self.held_guess,
+            "held": self.held,
             "verify_frame": self.frame_path,
             "verify_reason": self.reason,
         }
+        if self.vlm is not None:
+            payload.update(self.vlm.as_log())
+        return payload
 
 
 @dataclass(frozen=True)
@@ -139,32 +150,52 @@ def play_pick(arm, zone: zones.Zone) -> bool:
 # --- Verification (partial G5) -------------------------------------------
 
 
-def verify_held(arm, object_name: str, save_frame: bool = True) -> VerifyResult:
-    """After the lift: are we actually holding it?
+def read_gripper(arm) -> float | None:
+    """The gripper's position, or None if it could not be read.
 
-    Two signals, one of which is not implemented yet:
+    Separate from verify_held because this is the only part that touches the
+    serial bus. In the voice agent it runs on the motion worker thread, which
+    owns the bus, while the VLM half runs elsewhere — reading the bus from two
+    threads is how you get a corrupted frame mid-grasp.
+    """
+    try:
+        return float(arm.read_positions()[config.GRIPPER_JOINT])
+    except Exception as exc:
+        # Verification reports, it never raises: the arm may be holding an
+        # object and a failed read must not become an exception mid-grasp.
+        log.warning("could not read the gripper: %s", exc)
+        return None
 
-    1. Gripper closure — cheap and available now. The gripper is 0-100 percent
-       with 0 fully closed, so jaws that shut on nothing read near zero while
-       jaws stopped by an object rest higher. This is WEAK: the threshold has to
-       be calibrated against the recorded close target, and a very thin object
-       is indistinguishable from air.
-    2. The VLM check — TODO(stage 6): ask Gemini "is the <object> in the gripper,
-       and is it gone from its spot?" over the re-captured frame. That is the
-       real G5 verification; the frame is captured here so the hook is ready and
-       so there is a picture of the outcome in the log either way.
+
+def verify_held(
+    object_name: str,
+    gripper_percent: float | None,
+    frame=None,
+    use_vlm: bool = True,
+) -> VerifyResult:
+    """Trust gate G5: did the arm actually end up holding the object?
+
+    Two independent signals, deliberately weighted:
+
+    1. **The VLM** (`eyes.confirm_held`) — the real check. It can see that the
+       object is in the jaws AND gone from its spot, which is the thing we
+       actually care about.
+    2. **Gripper closure** — cheap and weak. The gripper is 0-100 percent with 0
+       fully closed, so jaws that shut on nothing read near zero. A thin object
+       is indistinguishable from air on this signal alone, which is exactly why
+       it does not get the final say.
+
+    The VLM wins when it commits with enough confidence. Closure is the
+    tie-breaker for when it will not. If neither can tell, ``held`` is None and
+    the robot says so rather than claiming success.
+
+    Takes no ``arm``: everything here is a camera and a network call.
     """
     reasons: list[str] = []
 
-    gripper_percent: float | None = None
     held_guess: bool | None = None
-    try:
-        pose = arm.read_positions()
-        gripper_percent = float(pose[config.GRIPPER_JOINT])
-    except Exception as exc:
-        # Verification reports, it never raises: the arm is holding an object
-        # and a failed read must not become an exception mid-grasp.
-        reasons.append(f"could not read the gripper: {exc}")
+    if gripper_percent is None:
+        reasons.append("gripper position unavailable")
     else:
         held_guess = gripper_percent > config.GRIPPER_EMPTY_MAX_PERCENT
         reasons.append(
@@ -173,32 +204,52 @@ def verify_held(arm, object_name: str, save_frame: bool = True) -> VerifyResult:
         )
 
     frame_path: str | None = None
-    if save_frame:
+    if frame is None and use_vlm:
         try:
             frame = eyes.capture_frame()
-            import cv2
-
-            config.TEST_OUT_DIR.mkdir(parents=True, exist_ok=True)
-            path = config.TEST_OUT_DIR / "pick_verify.jpg"
-            if cv2.imwrite(str(path), frame):
-                frame_path = str(path)
         except Exception as exc:
-            # Verification is a report, not a control path: never let it raise
-            # while the arm is holding an object.
             reasons.append(f"could not capture a verification frame: {exc}")
+    if frame is not None:
+        frame_path = _save_verification_frame(frame, reasons)
 
-    # TODO(stage 6, gate G5): run the Gemini check over the captured frame —
-    # "is the <object> held in the gripper, and gone from its marked spot?" —
-    # and let it override held_guess. Deliberately not called here: stage 5 does
-    # not wire vision into a gate, and a half-wired gate is worse than none.
-    reasons.append(f"VLM confirmation of {object_name!r} not implemented (stage 6)")
+    vlm: eyes.HeldCheck | None = None
+    if use_vlm:
+        vlm = eyes.confirm_held(object_name, frame=frame)
+        reasons.append(f"vision says held={vlm.held} ({vlm.confidence:.2f}): {vlm.reason}")
+
+    # Fuse. The VLM only overrules closure when it actually committed to an
+    # answer AND was confident enough to be worth believing.
+    if vlm is not None and vlm.held is not None and vlm.confidence >= config.G5_MIN_CONFIDENCE:
+        held = vlm.held
+        reasons.append("verdict from vision")
+    elif held_guess is not None:
+        held = held_guess
+        reasons.append("verdict from the gripper reading (vision would not commit)")
+    else:
+        held = None
+        reasons.append("no usable signal — cannot tell")
 
     return VerifyResult(
         gripper_percent=gripper_percent,
         held_guess=held_guess,
+        vlm=vlm,
+        held=held,
         frame_path=frame_path,
         reason="; ".join(reasons),
     )
+
+
+def _save_verification_frame(frame, reasons: list[str]) -> str | None:
+    """Keep a picture of the outcome, so a disputed verdict can be reviewed."""
+    try:
+        import cv2
+
+        config.TEST_OUT_DIR.mkdir(parents=True, exist_ok=True)
+        path = config.TEST_OUT_DIR / "pick_verify.jpg"
+        return str(path) if cv2.imwrite(str(path), frame) else None
+    except Exception as exc:
+        reasons.append(f"could not save the verification frame: {exc}")
+        return None
 
 
 # --- The pick ------------------------------------------------------------
@@ -295,7 +346,9 @@ def pick_object(arm, object_name: str, frame=None, verify: bool = True) -> PickR
             )
         )
 
-    outcome = verify_held(arm, object_name) if verify else VerifyResult()
+    outcome = (
+        verify_held(object_name, read_gripper(arm)) if verify else VerifyResult()
+    )
     return _log(_replace(base, ok=True, moved=True, verify=outcome, reason=""))
 
 
