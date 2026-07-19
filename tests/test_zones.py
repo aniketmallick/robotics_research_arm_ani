@@ -400,77 +400,117 @@ def test_read_gripper_never_raises_when_the_arm_misbehaves():
     assert pick.read_gripper(BrokenArm()) is None
 
 
-def test_gripper_closed_on_nothing_reads_as_empty():
-    outcome = pick.verify_held("banana", 0.5, use_vlm=False)
-    assert outcome.held_guess is False
-    assert outcome.held is False
+def vlm_says(monkeypatch, held, confidence=0.9, reason="test"):
+    monkeypatch.setattr(
+        pick.eyes, "confirm_held",
+        lambda obj, frame=None: eyes.HeldCheck(held=held, confidence=confidence, reason=reason),
+    )
 
 
-def test_gripper_stopped_by_an_object_reads_as_held():
-    outcome = pick.verify_held("banana", 30.0, use_vlm=False)
-    assert outcome.held_guess is True
+@pytest.fixture
+def placing(monkeypatch):
+    monkeypatch.setattr(config, "PICK_MODE", "place")
+
+
+@pytest.fixture
+def holding(monkeypatch):
+    monkeypatch.setattr(config, "PICK_MODE", "hold")
+
+
+# --- G5 in PLACE mode (the default: macros end with the object in the tray) ---
+
+
+def test_place_success_is_the_object_being_gone_even_with_an_empty_gripper(placing, monkeypatch):
+    """THE regression test. The macros are pick-and-place, so the gripper is
+    empty on success. Reading that as a failed grasp reported every successful
+    delivery as a miss."""
+    vlm_says(monkeypatch, held=True, reason="the spot is empty")
+    outcome = pick.verify_held("red block", 0.4, frame=object(), use_vlm=True)
     assert outcome.held is True
+    assert outcome.gripper_percent == pytest.approx(0.4)
 
 
-def test_no_signal_at_all_says_it_cannot_tell():
-    """Better to admit ignorance than to claim a grasp that may not exist."""
-    outcome = pick.verify_held("banana", None, use_vlm=False)
-    assert outcome.held is None
-    assert "cannot tell" in outcome.reason
-
-
-def test_a_confident_vlm_overrules_the_gripper(monkeypatch):
-    """Jaws stopped by a fingertip read 'held'; vision knows better."""
-    monkeypatch.setattr(
-        pick.eyes, "confirm_held",
-        lambda obj, frame=None: eyes.HeldCheck(held=False, confidence=0.95, reason="table"),
-    )
-    outcome = pick.verify_held("banana", 30.0, frame=object(), use_vlm=True)
-    assert outcome.held_guess is True
-    assert outcome.held is False, "the VLM is the real check"
-
-
-def test_an_unsure_vlm_defers_to_the_gripper(monkeypatch):
-    monkeypatch.setattr(
-        pick.eyes, "confirm_held",
-        lambda obj, frame=None: eyes.HeldCheck(held=False, confidence=0.05, reason="cannot tell"),
-    )
-    outcome = pick.verify_held("banana", 30.0, frame=object(), use_vlm=True)
-    assert outcome.held is True, "a barely-confident VLM must not overrule the only hard signal"
-
-
-def test_a_vlm_that_will_not_commit_defers_to_the_gripper(monkeypatch):
-    monkeypatch.setattr(
-        pick.eyes, "confirm_held",
-        lambda obj, frame=None: eyes.HeldCheck(held=None, confidence=0.9, reason="unreadable"),
-    )
-    outcome = pick.verify_held("banana", 2.0, frame=object(), use_vlm=True)
+def test_place_failure_is_the_object_still_sitting_there(placing, monkeypatch):
+    vlm_says(monkeypatch, held=False, reason="still on the table")
+    outcome = pick.verify_held("red block", 0.4, frame=object(), use_vlm=True)
     assert outcome.held is False
 
 
-def test_verify_survives_a_vision_explosion(monkeypatch):
-    """Verification runs while the arm may be holding something."""
+def test_place_gripper_is_recorded_but_never_a_verdict(placing, monkeypatch):
+    """A full gripper does not make a place a success, and an empty one does not
+    make it a failure. Only vision decides."""
+    vlm_says(monkeypatch, held=False)
+    assert pick.verify_held("red block", 30.0, frame=object(), use_vlm=True).held is False
+    vlm_says(monkeypatch, held=True)
+    assert pick.verify_held("red block", 0.0, frame=object(), use_vlm=True).held is True
 
-    def boom(obj, frame=None):
-        raise RuntimeError("network gone")
 
-    monkeypatch.setattr(pick.eyes, "confirm_held", boom)
-    with pytest.raises(RuntimeError):
-        # confirm_held itself is the layer that must not raise; prove it here
-        # rather than pretending verify_held swallows arbitrary bugs.
-        boom("banana")
+def test_place_says_it_cannot_tell_when_vision_will_not_commit(placing, monkeypatch):
+    """An empty gripper is identical whether the object reached the tray or was
+    never picked up, so there is nothing to fall back on."""
+    vlm_says(monkeypatch, held=True, confidence=0.05)
+    outcome = pick.verify_held("red block", 0.4, frame=object(), use_vlm=True)
+    assert outcome.held is None
+    assert "proves nothing" in outcome.reason
+
+
+def test_place_says_it_cannot_tell_when_vision_is_unavailable(placing, monkeypatch):
     monkeypatch.setattr(
         pick.eyes, "confirm_held",
         lambda obj, frame=None: eyes.HeldCheck(None, 0.0, "could not run the visual check"),
     )
-    outcome = pick.verify_held("banana", 30.0, frame=object(), use_vlm=True)
-    assert outcome.held is True  # falls back to closure
+    assert pick.verify_held("red block", 0.4, frame=object(), use_vlm=True).held is None
+
+
+# --- G5 in HOLD mode (macros that end holding the object) ---
+
+
+def test_hold_gripper_closed_on_nothing_reads_as_empty(holding):
+    outcome = pick.verify_held("red block", 0.5, use_vlm=False)
+    assert outcome.held_guess is False
+    assert outcome.held is False
+
+
+def test_hold_gripper_stopped_by_an_object_reads_as_held(holding):
+    outcome = pick.verify_held("red block", 30.0, use_vlm=False)
+    assert outcome.held_guess is True
+    assert outcome.held is True
+
+
+def test_hold_no_signal_at_all_says_it_cannot_tell(holding):
+    outcome = pick.verify_held("red block", None, use_vlm=False)
+    assert outcome.held is None
+    assert "cannot tell" in outcome.reason
+
+
+def test_hold_a_confident_vlm_overrules_the_gripper(holding, monkeypatch):
+    """Jaws stopped by a fingertip read 'held'; vision knows better."""
+    vlm_says(monkeypatch, held=False, confidence=0.95, reason="table")
+    outcome = pick.verify_held("red block", 30.0, frame=object(), use_vlm=True)
+    assert outcome.held_guess is True
+    assert outcome.held is False
+
+
+def test_hold_an_unsure_vlm_defers_to_the_gripper(holding, monkeypatch):
+    vlm_says(monkeypatch, held=False, confidence=0.05, reason="cannot tell")
+    assert pick.verify_held("red block", 30.0, frame=object(), use_vlm=True).held is True
+
+
+def test_hold_a_vlm_that_will_not_commit_defers_to_the_gripper(holding, monkeypatch):
+    vlm_says(monkeypatch, held=None, confidence=0.9, reason="unreadable")
+    assert pick.verify_held("red block", 2.0, frame=object(), use_vlm=True).held is False
+
+
+# --- shared ---
+
+
+def test_the_question_asked_is_named_in_the_reason(placing, monkeypatch):
+    """The audit trail must say WHICH question vision answered."""
+    vlm_says(monkeypatch, held=True)
+    assert "gone from its spot" in pick.verify_held("red block", 0.0, frame=object()).reason
 
 
 def test_verify_result_serialises_for_the_decision_log(monkeypatch):
-    monkeypatch.setattr(
-        pick.eyes, "confirm_held",
-        lambda obj, frame=None: eyes.HeldCheck(held=True, confidence=0.8, reason="in the jaws"),
-    )
-    outcome = pick.verify_held("banana", 30.0, frame=object(), use_vlm=True)
+    vlm_says(monkeypatch, held=True, confidence=0.8, reason="the spot is empty")
+    outcome = pick.verify_held("red block", 0.0, frame=object(), use_vlm=True)
     json.dumps(outcome.as_log(), allow_nan=False)

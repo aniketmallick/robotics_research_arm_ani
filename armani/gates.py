@@ -134,8 +134,10 @@ class GatedResult:
     def speak(self) -> str:
         """One line the robot can say. Style is the persona's; facts are ours."""
         if self.ok:
-            held = "and I've got it" if self.verified else "but I don't think I got it"
-            return f"{self.object}, {self.confidence:.0%} — {held}."
+            done = (
+                "and it's in the tray" if config.PICK_MODE == "place" else "and I've got it"
+            )
+            return f"{self.object}, {self.confidence:.0%} — {done}."
         return self.reason
 
 
@@ -363,7 +365,7 @@ def run_gated_pick(
         ok=bool(held),
         object=object_name,
         stopped_at=None if held else G5_VERIFY,
-        reason="" if held else f"I ran the pick but I don't think I got the {object_name}.",
+        reason="" if held else _missed(object_name),
         confidence=confidence,
         vision_confidence=detection.confidence,
         zone=zone.id,
@@ -378,6 +380,13 @@ def run_gated_pick(
     )
     log_event("gated_pick", **result.as_log())
     return result
+
+
+def _missed(object_name: str) -> str:
+    """How to admit a failed action, in whichever mode we are running."""
+    if config.PICK_MODE == "place":
+        return f"I ran the move but I couldn't move the {object_name}."
+    return f"I ran the pick but I don't think I got the {object_name}."
 
 
 def _carry(fields: dict) -> dict:

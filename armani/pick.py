@@ -173,29 +173,36 @@ def verify_held(
     frame=None,
     use_vlm: bool = True,
 ) -> VerifyResult:
-    """Trust gate G5: did the arm actually end up holding the object?
+    """Trust gate G5: did the action actually work?
 
-    Two independent signals, deliberately weighted:
+    What counts as success is set by config.PICK_MODE, and it is not cosmetic:
 
-    1. **The VLM** (`eyes.confirm_held`) — the real check. It can see that the
-       object is in the jaws AND gone from its spot, which is the thing we
-       actually care about.
-    2. **Gripper closure** — cheap and weak. The gripper is 0-100 percent with 0
-       fully closed, so jaws that shut on nothing read near zero. A thin object
-       is indistinguishable from air on this signal alone, which is exactly why
-       it does not get the final say.
+    * **place** (what the recorded macros do) — the object ends in the tray and
+      the gripper is deliberately EMPTY. Success is the object being GONE from
+      its marked spot. The gripper reading is recorded but is NOT a verdict:
+      an empty gripper is the expected end state, and letting it vote would
+      report every successful delivery as a failed grasp.
+    * **hold** — the macro ends holding the object. Then the two signals are
+      the VLM (which wins when it commits confidently) and gripper closure
+      (a weak tie-breaker: a thin object is indistinguishable from air).
 
-    The VLM wins when it commits with enough confidence. Closure is the
-    tie-breaker for when it will not. If neither can tell, ``held`` is None and
-    the robot says so rather than claiming success.
+    If nothing can tell, ``held`` is None and the robot says so rather than
+    claiming success.
 
     Takes no ``arm``: everything here is a camera and a network call.
     """
+    placing = config.PICK_MODE == "place"
     reasons: list[str] = []
 
     held_guess: bool | None = None
     if gripper_percent is None:
         reasons.append("gripper position unavailable")
+    elif placing:
+        # Logged for the audit trail, deliberately not a verdict.
+        held_guess = gripper_percent > config.GRIPPER_EMPTY_MAX_PERCENT
+        reasons.append(
+            f"gripper at {gripper_percent:.1f}% (expected to be empty after placing)"
+        )
     else:
         held_guess = gripper_percent > config.GRIPPER_EMPTY_MAX_PERCENT
         reasons.append(
@@ -215,13 +222,22 @@ def verify_held(
     vlm: eyes.HeldCheck | None = None
     if use_vlm:
         vlm = eyes.confirm_held(object_name, frame=frame)
-        reasons.append(f"vision says held={vlm.held} ({vlm.confidence:.2f}): {vlm.reason}")
+        question = "gone from its spot" if placing else "held"
+        reasons.append(f"vision says {question}={vlm.held} ({vlm.confidence:.2f}): {vlm.reason}")
 
-    # Fuse. The VLM only overrules closure when it actually committed to an
-    # answer AND was confident enough to be worth believing.
-    if vlm is not None and vlm.held is not None and vlm.confidence >= config.G5_MIN_CONFIDENCE:
-        held = vlm.held
+    vlm_committed = (
+        vlm is not None and vlm.held is not None and vlm.confidence >= config.G5_MIN_CONFIDENCE
+    )
+    if vlm_committed:
+        held = vlm.held  # type: ignore[union-attr]
         reasons.append("verdict from vision")
+    elif placing:
+        # No fallback in place mode. The only local signal is the gripper, and
+        # the gripper is empty whether the object landed in the tray or was
+        # never picked up at all — so it cannot distinguish success from
+        # failure here. Saying "cannot tell" is the honest answer.
+        held = None
+        reasons.append("vision would not commit, and an empty gripper proves nothing here")
     elif held_guess is not None:
         held = held_guess
         reasons.append("verdict from the gripper reading (vision would not commit)")

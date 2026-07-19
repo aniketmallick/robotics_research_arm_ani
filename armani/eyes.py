@@ -616,6 +616,8 @@ class HeldCheck:
         }
 
 
+# Two prompts, because "did it work?" means different things depending on what
+# the operator recorded. See config.PICK_MODE.
 HELD_PROMPT = (
     "Look at this robot arm and table. The robot just tried to pick up the {object}.\n"
     "Two things decide the answer: is the {object} held in the robot's gripper, and is it "
@@ -626,19 +628,44 @@ HELD_PROMPT = (
     "Be strict: if you cannot tell, say so in the reason and give a low confidence."
 )
 
+# Place mode: the arm has already let go. An empty gripper is the SUCCESS case,
+# so the question is only about the marked spot the object started on.
+PLACED_PROMPT = (
+    "Look at this robot arm and table. The robot just tried to move the {object} "
+    "from its marked spot on the table into the tray.\n"
+    "Question: is the {object} GONE from its marked spot on the table?\n"
+    'Reply with JSON only: {"held": true or false, "confidence": 0.0 to 1.0, '
+    '"reason": "one short sentence"}.\n'
+    "Answer held=true if the spot where the {object} was sitting is now empty, or you can "
+    "see the {object} in the tray. Answer held=false if the {object} is still sitting on "
+    "the table where it started.\n"
+    "The robot's gripper being empty is EXPECTED and does not mean failure — it has "
+    "already let go. Judge only by whether the {object} has left its spot. "
+    "If you cannot tell, say so in the reason and give a low confidence."
+)
+
+
+def _verify_prompt() -> str:
+    return PLACED_PROMPT if config.PICK_MODE == "place" else HELD_PROMPT
+
 
 def confirm_held(object_name: str, frame=None) -> HeldCheck:
-    """Ask Gemini whether the named object ended up in the gripper.
+    """Ask Gemini whether the action actually worked.
+
+    What that means depends on config.PICK_MODE: in "hold" mode the object must
+    be in the jaws; in "place" mode — what the recorded macros actually do — it
+    must be GONE from its marked spot, and an empty gripper is expected.
+    ``held`` is the answer to whichever question was asked.
 
     This is the real G5 check. It never raises: verification runs while the arm
-    may be holding something, so a network failure must come back as "I could
-    not tell" rather than as an exception in the middle of a grasp.
+    may still be holding something, so a network failure must come back as "I
+    could not tell" rather than as an exception in the middle of a grasp.
     """
     object_name = (object_name or "").strip() or "object"
     try:
         if frame is None:
             frame = capture_frame()
-        model, raw = _ask(encode_jpeg(frame), HELD_PROMPT.replace("{object}", object_name))
+        model, raw = _ask(encode_jpeg(frame), _verify_prompt().replace("{object}", object_name))
     except Exception as exc:
         return HeldCheck(None, 0.0, f"could not run the visual check: {exc}")
 

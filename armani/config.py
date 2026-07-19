@@ -558,6 +558,21 @@ CONF_CLEAR_MARGIN_PX = float(os.getenv("ARMANI_CONF_CLEAR_MARGIN_PX") or 120.0)
 # these the VLM abstains and the gripper reading breaks the tie.
 G5_MIN_CONFIDENCE = float(os.getenv("ARMANI_G5_MIN_CONFIDENCE") or 0.50)
 
+# What "success" means for the recorded macros, and therefore what G5 checks.
+#
+#   "place"  the macros are pick-AND-PLACE: the object ends in the tray and the
+#            gripper is deliberately EMPTY at the end. Success is the object
+#            being GONE FROM ITS SPOT. An empty gripper is the expected outcome
+#            and must never be read as a failed grasp.
+#   "hold"   the macros end holding the object. Success is it being in the jaws,
+#            and an empty gripper is a miss.
+#
+# Getting this wrong inverts G5: with "hold" against place-style macros, every
+# successful delivery reports as a failure.
+PICK_MODE = (os.getenv("ARMANI_PICK_MODE") or "place").strip().lower()
+if PICK_MODE not in ("place", "hold"):
+    raise ValueError(f"ARMANI_PICK_MODE must be 'place' or 'hold', got {PICK_MODE!r}")
+
 # --- Voice agent (stage 3) ----------------------------------------------
 # Realtime output voice. See RealtimeVoice options in the OpenAI Agents SDK;
 # "ash" is the SDK default. Kept in config so the persona's sound is not buried

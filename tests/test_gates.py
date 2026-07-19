@@ -412,7 +412,28 @@ def test_g5_failure_is_reported_honestly(rig, monkeypatch):
     assert result.moved, "it did move — refusing to admit that would be a lie"
     assert result.verified is False
     assert result.stopped_at == gates.G5_VERIFY
-    assert "don't think I got" in result.reason
+    # Place mode (the default): failure is "couldn't move it", not "didn't grab it".
+    assert "couldn't move" in result.reason
+
+
+def test_g5_wording_follows_the_pick_mode(rig, monkeypatch):
+    """A pick-and-place macro that worked must not announce a failed grasp."""
+    see(monkeypatch, detection())
+    verifies(monkeypatch, held=True)
+
+    monkeypatch.setattr(config, "PICK_MODE", "place")
+    placed = gates.run_gated_pick(
+        FakeArm(), "red block", clarify=never_called, approve=never_called,
+        perform=performed([]), verify_vlm=False,
+    )
+    assert "tray" in placed.speak()
+
+    monkeypatch.setattr(config, "PICK_MODE", "hold")
+    holding = gates.run_gated_pick(
+        FakeArm(), "red block", clarify=never_called, approve=never_called,
+        perform=performed([]), verify_vlm=False,
+    )
+    assert "got it" in holding.speak()
 
 
 def test_g5_success(rig, monkeypatch):

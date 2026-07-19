@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import itertools
 import sys
 import threading
 from pathlib import Path
@@ -35,6 +36,17 @@ from armani import agent, config, motion, safety, uistate  # noqa: E402
 from armani.logutil import get_logger, log_event  # noqa: E402
 
 log = get_logger("run_agent")
+
+# The realtime API rejects an input buffer shorter than 100 ms. One mic block is
+# AUDIO_BLOCKSIZE / AUDIO_SAMPLE_RATE seconds (20 ms at the pinned settings), so
+# a hold has to produce at least this many blocks to be worth committing.
+# Anything shorter was a stray tap, and committing it is exactly the
+# "buffer too small" session error this avoids.
+MIN_COMMIT_MS = 100
+MIN_COMMIT_FRAMES = max(
+    1,
+    -(-MIN_COMMIT_MS * config.AUDIO_SAMPLE_RATE // (1000 * config.AUDIO_BLOCKSIZE)),
+)
 
 CHECKLIST = """\
 Scripted demo checklist (say these out loud, hold space while you talk):
@@ -210,7 +222,13 @@ async def _pump_events(session, worker: agent.MotionWorker, *, text_mode: bool) 
             elif etype == "tool_start":
                 log_event("agent_tool_start", tool=getattr(event.tool, "name", "?"))
             elif etype == "error":
-                log.error("session error: %s", event.error)
+                # A truncate that lost the race against playback is noise, not a
+                # fault. Surfacing it mid-demo makes a working barge-in look
+                # broken to anyone reading the console.
+                if _is_harmless_audio_error(event.error):
+                    log.debug("ignored a harmless audio error: %s", event.error)
+                else:
+                    log.error("session error: %s", event.error)
             # A human kill switch fires on another thread; check it every event.
             if safety.stop_requested() and not safety.freeze_suppressed():
                 await _run_freeze_menu(session, worker)
@@ -302,17 +320,38 @@ async def _voice_input(session, worker: agent.MotionWorker) -> None:
     loop = asyncio.get_running_loop()
     talking = threading.Event()
     key = _ptt_key(keyboard)
+    # Frames actually captured during the current hold. A tap that produces
+    # none must not commit: the realtime API rejects a buffer shorter than
+    # ~100 ms and surfaces it as a session error mid-demo.
+    #
+    # itertools.count rather than a plain int, because this is incremented from
+    # the sounddevice callback thread and read from the pynput listener thread.
+    # `next()` on a count() is atomic under the GIL; `n += 1` is not.
+    captured = itertools.count()
+    hold_start = 0
 
     def on_press(k: object) -> None:
+        nonlocal hold_start
         if k == key and not talking.is_set():
+            hold_start = next(captured)
             talking.set()
             uistate.publish(uistate.LISTENING)
             # Barge-in: pressing space while it speaks interrupts the model.
-            asyncio.run_coroutine_threadsafe(session.interrupt(), loop)
+            asyncio.run_coroutine_threadsafe(_interrupt(session), loop)
 
     def on_release(k: object) -> None:
         if k == key and talking.is_set():
             talking.clear()
+            frames = next(captured) - hold_start - 1
+            if frames < MIN_COMMIT_FRAMES:
+                # Too short to have said anything, and too short for the API to
+                # accept. Say nothing rather than commit a buffer it will reject.
+                log.info(
+                    "push-to-talk press too short (%d frames, need %d) — ignored",
+                    frames, MIN_COMMIT_FRAMES,
+                )
+                uistate.publish(uistate.IDLE)
+                return
             uistate.publish(uistate.THINKING)
             asyncio.run_coroutine_threadsafe(_commit_and_respond(session), loop)
 
@@ -331,6 +370,7 @@ async def _voice_input(session, worker: agent.MotionWorker) -> None:
         if status:
             log.debug("mic status: %s", status)
         if talking.is_set():
+            next(captured)
             asyncio.run_coroutine_threadsafe(session.send_audio(bytes(indata)), loop)
 
     try:
@@ -351,8 +391,45 @@ async def _voice_input(session, worker: agent.MotionWorker) -> None:
 
 
 async def _commit_and_respond(session) -> None:
-    await session.send_audio(b"", commit=True)
-    await agent.request_response(session)
+    """Close the mic buffer and ask for a reply.
+
+    Commits with a raw client event rather than ``send_audio(b"", commit=True)``.
+    Appending an empty chunk just to set the commit flag is what produced
+    "buffer too small" errors on short holds; the caller has already guaranteed
+    real audio was captured, so all that is left to do is commit it.
+    """
+    from agents.realtime.model_inputs import RealtimeModelSendRawMessage
+
+    try:
+        await session.model.send_event(
+            RealtimeModelSendRawMessage(message={"type": "input_audio_buffer.commit"})
+        )
+        await agent.request_response(session)
+    except Exception as exc:
+        log.warning("could not commit the turn: %s", exc)
+        uistate.publish(uistate.IDLE)
+
+
+# The realtime API rejects a truncate past what has actually been played. It is
+# a race we cannot win from here — audio is in flight — and it is harmless, so
+# it is recognised and swallowed rather than shown to the operator as an error.
+_HARMLESS_AUDIO_ERRORS = ("already shorter", "audio_end_ms", "invalid_value")
+
+
+def _is_harmless_audio_error(detail: object) -> bool:
+    text = str(detail).lower()
+    return any(marker in text for marker in _HARMLESS_AUDIO_ERRORS)
+
+
+async def _interrupt(session) -> None:
+    """Barge-in. Never let a truncate race surface as a session error."""
+    try:
+        await session.interrupt()
+    except Exception as exc:
+        if _is_harmless_audio_error(exc):
+            log.debug("ignored a harmless interrupt race: %s", exc)
+        else:
+            log.warning("interrupt failed: %s", exc)
 
 
 def _ptt_key(keyboard) -> object:  # noqa: ANN001
