@@ -42,7 +42,7 @@ Scripted demo checklist (say these out loud, hold space while you talk):
   2. "What gestures can you do?"
   3. "Take a bow."          <- it should TALK WHILE THE ARM MOVES
   4. "Improvise a tiny robot dance."
-  5. "Pick up the banana."  <- it must honestly decline: no eyes yet
+  5. "Pick up the red block."  <- it must honestly decline: no eyes yet
   6. Interrupt it mid-sentence by tapping space (barge-in).
   7. "Stop" while a gesture is running.
   8. Ctrl-C to freeze, then [s] to recover.

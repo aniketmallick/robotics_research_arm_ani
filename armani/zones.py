@@ -8,7 +8,7 @@ teleop-records a *working* pick at each marked spot, and the arm replays it.
 What that buys, all at once: no homography error, no IK verticality problem, no
 riser geometry, and a camera bump costs a two-minute re-click instead of a full
 recalibration. What vision has to do shrinks to IDENTITY — "which of these
-marked spots holds the banana?" — which is a coarse call that tolerates being
+marked spots holds the red block?" — which is a coarse call that tolerates being
 tens of pixels wrong.
 
 Deliberately absent from this file: robot-frame coordinates, metres, homography

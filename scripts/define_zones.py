@@ -7,7 +7,7 @@ stage-4 homography it replaces, which needed a printed board, a measured origin
 and sub-15-pixel reprojection to be usable at all.
 
 You click where each marked spot APPEARS in the camera frame. Zone labels name
-the SPOT, not the object on it ("front-left", not "banana") — which object sits
+the SPOT, not the object on it ("front-left", not "red block") — which object sits
 where is decided live by Gemini on every frame, so objects can be swapped
 between spots at demo time and everything still works.
 

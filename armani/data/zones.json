@@ -1,0 +1,55 @@
+{
+  "created": "2026-07-19T00:26:49+00:00",
+  "frame_size": [
+    640,
+    480
+  ],
+  "zones": [
+    {
+      "id": "z1",
+      "label": "front-left",
+      "pixel_center": [
+        416,
+        274
+      ],
+      "pick_episode": 0
+    },
+    {
+      "id": "z2",
+      "label": "centre",
+      "pixel_center": [
+        322,
+        220
+      ],
+      "pick_episode": 1
+    },
+    {
+      "id": "z3",
+      "label": "front-right",
+      "pixel_center": [
+        230,
+        269
+      ],
+      "pick_episode": 2
+    },
+    {
+      "id": "z4",
+      "label": "back-left",
+      "pixel_center": [
+        410,
+        158
+      ],
+      "pick_episode": 3
+    },
+    {
+      "id": "z5",
+      "label": "back-right",
+      "pixel_center": [
+        238,
+        154
+      ],
+      "pick_episode": 4
+    }
+  ],
+  "note": "Pixel positions of the marked table spots. Valid for this camera pose and frame size. zone order == pick macro episode order."
+}

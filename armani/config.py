@@ -385,15 +385,22 @@ TABLE_MARGIN_M = float(os.getenv("ARMANI_TABLE_MARGIN_M") or 0.02)
 CALIB_MAX_REPROJECTION_PX = float(os.getenv("ARMANI_CALIB_MAX_REPROJ_PX") or 15.0)
 
 # --- Object catalog ------------------------------------------------------
-# The five demo objects. `grasp_height_m` is how far above the table surface the
-# gripper should close on that object — DEFINED NOW, USED IN STAGE 5. Stage 4
-# never descends, so these values are not exercised yet.
+# The five demo objects. On the taught-zone path the NAMES are the load-bearing
+# part: they are the strings Gemini is asked to find, and identity is the only
+# job vision has. Pick names the model can tell apart — measure that with
+# `smoke_11_pick.py --identity`, not by intuition.
+#
+# `grasp_height_m` is how far above the table the gripper would close on that
+# object. It is used ONLY by the stage-4 stretch path (hover -> descend), which
+# the demo does not run: a taught-zone pick replays a human recording that
+# already has the right height baked in. These values are ESTIMATES, never
+# measured, and must be checked before anything descends on them.
 OBJECT_CATALOG: dict[str, dict[str, float]] = {
     "red block": {"grasp_height_m": 0.015},
-    "banana": {"grasp_height_m": 0.015},
     "marker pen": {"grasp_height_m": 0.010},
-    "blue cup": {"grasp_height_m": 0.040},
-    "toy car": {"grasp_height_m": 0.020},
+    "black cup": {"grasp_height_m": 0.040},
+    "charger": {"grasp_height_m": 0.015},
+    "airpod": {"grasp_height_m": 0.015},
 }
 
 # --- Gestures ------------------------------------------------------------

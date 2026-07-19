@@ -181,7 +181,7 @@ probability, and it is not presented as one.
 The architect ratified **taught zones** after stage 4's calibration proved too
 fragile. Instead of computing where an object is and solving IK to reach it, the
 operator teleop-records a **working pick at each marked spot**, and the arm
-replays it. Vision's job shrinks to *identity* — "which spot holds the banana?" —
+replays it. Vision's job shrinks to *identity* — "which spot holds the red block?" —
 a coarse call that tolerates being tens of pixels wrong.
 
 That erases the coordinate-precision, IK-verticality, riser and camera-bump
@@ -202,16 +202,16 @@ python scripts/define_zones.py
 #    See docs/recording_picks.md for the full runbook.
 
 # 3. Identity without risk: real Gemini call, simulated arm, asserts no motion.
-python tests/smoke_11_pick.py --frame tests/out/frame.jpg --object banana
+python tests/smoke_11_pick.py --frame tests/out/frame.jpg --object "red block"
 
 # 4. The real pick. OPERATOR MUST WATCH THE ARM.
-python tests/smoke_11_pick.py --live --object banana
+python tests/smoke_11_pick.py --live --object "red block"
 
 # 5. The competence bar: does Gemini put each object on the right spot?
 python tests/smoke_11_pick.py --identity 10
 ```
 
-**Zone labels name the SPOT, not the object** ("front-left", not "banana").
+**Zone labels name the SPOT, not the object** ("front-left", not "red block").
 Which object is on which spot is decided live on every frame, so objects can be
 swapped between spots at demo time and nothing needs redoing.
 

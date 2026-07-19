@@ -13,7 +13,7 @@ coordinates and checked against the table polygon — but a missing homography i
 not a failure here. Vision works on its own; that part is simply skipped.
 
     python tests/smoke_09_vision.py --object "red block"
-    python tests/smoke_09_vision.py --frame tests/out/frame.jpg --object banana
+    python tests/smoke_09_vision.py --frame tests/out/frame.jpg --object "red block"
 """
 
 from __future__ import annotations

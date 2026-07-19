@@ -22,8 +22,8 @@ Four modes, in increasing order of what they touch:
                   the grasp is a human recording.
 
     python tests/smoke_11_pick.py --dry-run
-    python tests/smoke_11_pick.py --frame tests/out/frame.jpg --object banana
-    python tests/smoke_11_pick.py --live --object banana
+    python tests/smoke_11_pick.py --frame tests/out/frame.jpg --object "red block"
+    python tests/smoke_11_pick.py --live --object "red block"
     python tests/smoke_11_pick.py --identity 10
 """
 
@@ -89,7 +89,7 @@ def _dry_run() -> int:
 
     def detection(point):
         return eyes.Detection(
-            label="banana", point=point, confidence=0.9, frame_size=frame_size, model="dry-run"
+            label="red block", point=point, confidence=0.9, frame_size=frame_size, model="dry-run"
         )
 
     checks: list[tuple[str, bool, str]] = []
@@ -116,7 +116,7 @@ def _dry_run() -> int:
     ))
 
     wrong_size = zones.assign_zone(
-        eyes.Detection(label="banana", point=(104, 303), confidence=0.9,
+        eyes.Detection(label="red block", point=(104, 303), confidence=0.9,
                        frame_size=(1280, 960), model="dry-run"),
         zone_set,
     )

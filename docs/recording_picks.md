@@ -108,7 +108,7 @@ same one:
 
 ```bash
 python tests/smoke_11_pick.py --dry-run      # decision path, no hardware
-python tests/smoke_11_pick.py --live --object banana
+python tests/smoke_11_pick.py --live --object "red block"
 ```
 
 Then the number that actually matters — can Gemini tell the objects apart on the
