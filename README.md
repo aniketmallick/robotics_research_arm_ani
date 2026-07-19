@@ -334,6 +334,44 @@ re-recording needs the arm, the leader and half an hour you will not have at a
 venue. `scripts/backup_datasets.py` copies both into
 `armani/data/dataset_backup/` (gitignored — put it on a USB stick).
 
+## How to run — stage 8 (the face)
+
+Two screens ship, and they do different jobs. Run both.
+
+| screen | job | command |
+|---|---|---|
+| **dashboard** | the **proof** — gates, confidence, audit trail | `python scripts/run_dashboard.py` |
+| **avatar** | the **delight** — the mascot, mirroring what it's doing | `python scripts/run_avatar.py` |
+
+```bash
+python scripts/run_avatar.py                  # -> http://localhost:8771
+python scripts/run_avatar.py --host 0.0.0.0   # + prints a LAN URL for a phone
+python scripts/run_avatar.py --port 9001
+```
+
+The face shows five states — **idle · listening · thinking · talking · doing** —
+polled 8×/second from `/state`. The agent publishes each transition at moments
+that already existed: PTT key-down, key-up, the first audio chunk of a reply,
+and the motion worker starting and stopping a job. Text mode and `--no-motion`
+publish the same states, so the screen still animates without a mic or an arm.
+
+**Preview it with no backend:** `http://localhost:8771/?demo=1` runs the canned
+timeline, for showing the face when nothing else is running.
+
+**It is a mirror, not a controller.** `armani/uistate.py` writes
+`logs/ui_state.json` atomically (temp file + `os.replace`), never raises, and
+dedupes — so publishing `talking` on every audio chunk costs one write per real
+transition. If the file is missing, corrupt, or **stale** the reader says
+`idle`; a session that dies mid-sentence must not leave the mascot talking to an
+empty room.
+
+**The on-screen button is a visual affordance only.** The avatar server is a
+separate process from the voice session with no handle on the realtime socket,
+so it cannot open the mic — the **spacebar** does, through the agent's own
+global listener. Wiring the button would mean new IPC into `run_agent.py`,
+alongside the push-to-talk path the whole demo depends on. Not a trade worth
+making in a presentation stage.
+
 ### Gestures
 
 Eight macros replayed from one local teleop dataset, one episode each:

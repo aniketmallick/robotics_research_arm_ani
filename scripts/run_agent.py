@@ -31,7 +31,7 @@ if str(TESTS_DIR) not in sys.path:
 
 import _bootstrap  # noqa: E402,F401  (verifies the interpreter, exits if wrong)
 
-from armani import agent, config, motion, safety  # noqa: E402
+from armani import agent, config, motion, safety, uistate  # noqa: E402
 from armani.logutil import get_logger, log_event  # noqa: E402
 
 log = get_logger("run_agent")
@@ -120,12 +120,16 @@ def main() -> int:
         _warn_about_default_mic()
 
     print(CHECKLIST)
+    # Start from a known face, and clear any state a previous run died holding.
+    uistate.reset()
+    print("Avatar screen: python scripts/run_avatar.py   (then open the printed URL)\n")
 
     try:
         asyncio.run(_run(worker, text_mode=args.text, motion_enabled=motion_enabled))
     except KeyboardInterrupt:
         print("\nSession ended by Ctrl-C.")
     finally:
+        uistate.reset()  # never leave the mascot mid-sentence
         worker.shutdown()
         try:
             arm.disconnect()
@@ -180,10 +184,22 @@ async def _pump_events(session, worker: agent.MotionWorker, *, text_mode: bool) 
     try:
         async for event in session:
             etype = event.type
-            if etype == "audio" and player is not None:
-                player.play(event.audio.data)
+            if etype == "audio":
+                # The arm moving is the more informative thing to show, and it
+                # is the safety-relevant one, so "doing" outranks "talking"
+                # while a macro runs. publish() dedupes, so calling it on every
+                # audio chunk costs one write per real transition.
+                if not worker.busy:
+                    uistate.publish(uistate.TALKING)
+                if player is not None:
+                    player.play(event.audio.data)
             elif etype == "audio_interrupted" and player is not None:
                 player.flush()  # barge-in: drop what we were about to say
+            elif etype == "agent_end":
+                # Turn over. If the arm is still moving, leave the face on
+                # "doing" — the worker publishes idle when it actually stops.
+                if not worker.busy:
+                    uistate.publish(uistate.IDLE)
             elif etype == "history_added":
                 _print_item(event.item, printed)
             elif etype == "history_updated":
@@ -290,12 +306,14 @@ async def _voice_input(session, worker: agent.MotionWorker) -> None:
     def on_press(k: object) -> None:
         if k == key and not talking.is_set():
             talking.set()
+            uistate.publish(uistate.LISTENING)
             # Barge-in: pressing space while it speaks interrupts the model.
             asyncio.run_coroutine_threadsafe(session.interrupt(), loop)
 
     def on_release(k: object) -> None:
         if k == key and talking.is_set():
             talking.clear()
+            uistate.publish(uistate.THINKING)
             asyncio.run_coroutine_threadsafe(_commit_and_respond(session), loop)
 
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
@@ -360,6 +378,9 @@ async def _text_input(session) -> None:
         line = line.strip()
         if not line or line.lower() in ("quit", "exit"):
             return
+        # Text mode drives the same five states, so the face still animates for
+        # a demo given without a microphone.
+        uistate.publish(uistate.THINKING)
         # send_message triggers the response itself — do not also request_response,
         # or the model answers twice (see _run's greeting note).
         await session.send_message(line)

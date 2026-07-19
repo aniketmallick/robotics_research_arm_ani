@@ -58,6 +58,17 @@ LAST_FRAME_PATH = LOG_DIR / "last_frame.jpg"
 DASHBOARD_PORT = int(os.getenv("ARMANI_DASHBOARD_PORT") or 8770)
 # How many decision-log records the dashboard keeps in its feed.
 DASHBOARD_FEED_LIMIT = 40
+
+# --- Avatar UI (stage 8) -------------------------------------------------
+# The operator-facing face. Two screens ship: the dashboard is the PROOF (gates,
+# confidence, audit trail) and the avatar is the DELIGHT. Both read published
+# state; neither touches the arm.
+UI_STATE_PATH = LOG_DIR / "ui_state.json"
+AVATAR_PORT = int(os.getenv("ARMANI_AVATAR_PORT") or 8771)
+# A state older than this is treated as idle. Without it, a session that dies
+# mid-sentence would leave the mascot talking to an empty room forever. Longer
+# than the slowest legitimate state (a ~30 s pick macro) by a wide margin.
+UI_STATE_STALE_S = float(os.getenv("ARMANI_UI_STATE_STALE_S") or 120.0)
 # Where scripts/backup_datasets.py copies the irreplaceable recordings.
 DATASET_BACKUP_DIR = REPO_ROOT / "armani" / "data" / "dataset_backup"
 

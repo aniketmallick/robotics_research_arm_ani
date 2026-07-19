@@ -31,7 +31,7 @@ from agents.realtime import (
     RealtimeSession,
 )
 
-from armani import config, gestures, improvise, motion, safety
+from armani import config, gestures, improvise, motion, safety, uistate
 from armani.logutil import get_logger, log_event
 
 log = get_logger("agent")
@@ -211,6 +211,9 @@ class MotionWorker:
 
             with self._lock:
                 self._current = job.description
+            # Telemetry for the avatar screen. Best-effort by construction —
+            # uistate never raises — so this cannot affect the motion path.
+            uistate.publish(uistate.DOING, action=job.description)
             try:
                 self._job_start = self.arm.read_positions()  # type: ignore[attr-defined]
             except Exception:
@@ -245,6 +248,12 @@ class MotionWorker:
                 self._last_pose = self.arm.read_positions()  # type: ignore[attr-defined]
             except Exception:
                 pass
+
+            # The arm has stopped. submit() refuses while a job runs, so there is
+            # never a queued follow-up to flicker between. If the model is still
+            # speaking, the event pump puts the face back to "talking" on its
+            # next audio chunk.
+            uistate.publish(uistate.IDLE, after=job.description)
 
             self.completions.put(Completion(action=job.description, status=status, detail=detail))
             log_event("motion_completed", action=job.description, status=status, detail=detail)

@@ -38,12 +38,22 @@ Green **GO** and nothing else will do. The two that bite:
 | Gemini quota | enable billing in Google AI Studio (pay-as-you-go, fractions of a cent per call) |
 | Kill switch permission | System Settings → Privacy & Security → Accessibility + Input Monitoring → your terminal → **restart the terminal** |
 
-Then two windows:
+Then three windows:
 
 ```bash
-python scripts/run_dashboard.py     # projector: http://localhost:8770
+python scripts/run_dashboard.py     # the PROOF screen:   http://localhost:8770
+python scripts/run_avatar.py        # the FACE:           http://localhost:8771
 python scripts/run_agent.py         # your terminal: the demo
 ```
+
+**Screen layout that works:** dashboard on the projector (that is the one that
+wins the argument), avatar on a second monitor, tablet or phone facing the
+audience. For a phone, start it with `--host 0.0.0.0` and open the LAN URL it
+prints.
+
+If the avatar sits on **Ready** while you talk, the agent is not publishing —
+check `run_agent.py` is actually running and that `logs/ui_state.json` is being
+written. The face degrades to idle by design; it never blocks the demo.
 
 ---
 
