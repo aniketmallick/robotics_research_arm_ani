@@ -579,6 +579,11 @@ if PICK_MODE not in ("place", "hold"):
 # in code.
 REALTIME_VOICE = os.getenv("ARMANI_REALTIME_VOICE", "ash")
 
+# The first words out of its mouth at session start, verbatim. Kept as a single
+# fixed constant so it is trivially editable and so the greeting cannot drift
+# into a paraphrase.
+GREETING_LINE = "Hey! I am Groot!"
+
 # Push-to-talk: turn detection is OFF (see agent.py); the operator holds this key
 # to stream mic audio and releases to commit + request a response. pynput names
 # the spacebar "space"; kept configurable for a different PTT key if needed.

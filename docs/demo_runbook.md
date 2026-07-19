@@ -64,12 +64,17 @@ loud; the bracketed lines are what should happen.
 
 ### ACT 1 — it's alive (45s)
 
-> "Introduce yourself in one sentence."
+It opens on its own with **"Hey! I am Groot!"** and tells you to hold the
+spacebar. Then:
+
 > "What gestures can you do?"
 > "Take a bow."           *(it should keep talking while the arm moves)*
 > "Improvise a tiny robot dance."
+> "What's on the table?"  *(the `look` tool — names each object and its spot)*
 
-**Table:** anything. **Point:** personality and that speech and motion overlap.
+**Table:** the demo objects on their marked spots. **Point:** personality, that
+speech and motion overlap, and that it can see the scene before you ask it to
+touch anything.
 
 ### ACT 2 — a clean pick (45s)
 

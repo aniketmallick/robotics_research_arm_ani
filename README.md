@@ -110,7 +110,17 @@ spacebar; use `--text` if that is unavailable.
 
 **Tools** (each validates its args, logs to the decision log, returns compact JSON):
 `list_gestures`, `play_gesture`, `improvise_move`, `go_home`, `get_status`,
-`stop_motion`. `stop_motion` aborts the current move and holds — it does *not* open
+`stop_motion`, `look`, and the gated `pick` / `answer_pick` / `approve_pick`.
+
+`look` is the scene survey — "what's on the table?" — and is **read-only**, the
+same safety class as `get_status`: no motion, no gate, works in `--no-motion`.
+It spends **one** Gemini call for the whole catalog, not one per object, because
+the free tier is 20 requests/day/model. Objects it recognises but that aren't on
+a marked spot come back with `"spot": null` rather than being dropped or guessed.
+
+**It opens with a fixed line.** `config.GREETING_LINE` is spoken verbatim at
+session start (voice, `--text` and `--no-motion` alike), followed by one sentence
+in its own voice telling you how to talk to it. One constant, trivially editable. `stop_motion` aborts the current move and holds — it does *not* open
 the freeze menu (that belongs to the human kill switch only). Declining the startup
 operator gate drops into NO-MOTION mode: the personality still demos, motion tools
 return `refused`.

@@ -150,6 +150,28 @@ def main() -> int:
     return 0
 
 
+def _greeting_instruction(text_mode: bool) -> str:
+    """Make the model OPEN with config.GREETING_LINE, word for word.
+
+    Phrased as "start with exactly these words, before anything else" rather
+    than "greet the operator", because the second gets paraphrased — and the
+    whole point of a fixed opening line is that it is fixed. The sentence after
+    it is the model's own.
+    """
+    how = (
+        "type a message and press enter to talk to it"
+        if text_mode
+        else "hold the spacebar, or the button on screen, to talk"
+    )
+    return (
+        f'Begin your very next reply with exactly these words, verbatim and before '
+        f'anything else: "{config.GREETING_LINE}"\n'
+        f"Do not paraphrase that line, do not translate it, and do not put anything "
+        f"in front of it.\n"
+        f"Then add ONE short sentence in your own voice telling them to {how}."
+    )
+
+
 async def _run(worker: agent.MotionWorker, *, text_mode: bool, motion_enabled: bool) -> None:
     session_cm = agent.build_session(worker, text_only=text_mode)
     async with await session_cm as session:
@@ -157,10 +179,7 @@ async def _run(worker: agent.MotionWorker, *, text_mode: bool, motion_enabled: b
         # send_message already asks the model to respond (the SDK's _send_user_input
         # creates the response itself), so we do NOT also call request_response —
         # that second create is what made ARM-ANI reply twice to every turn.
-        await session.send_message(
-            "Greet the operator in one short sentence. If this is a voice session, mention "
-            "they hold the spacebar to talk."
-        )
+        await session.send_message(_greeting_instruction(text_mode))
 
 
         background = [

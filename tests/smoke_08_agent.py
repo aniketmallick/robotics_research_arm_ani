@@ -26,6 +26,8 @@ EXPECTED_TOOLS = {
     # stage 6 — the gated pick is a conversation, not one call: `pick` starts the
     # pipeline and the other two feed a gate that is waiting on a human answer.
     "pick", "answer_pick", "approve_pick",
+    # read-only scene survey, same safety class as get_status
+    "look",
 }
 
 

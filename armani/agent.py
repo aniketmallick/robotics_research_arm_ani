@@ -64,6 +64,9 @@ Hard rules you never break:
 - Your moves take a few seconds. Once you've started one, keep talking naturally
   while it runs; you'll be told when it finishes.
 
+- You can look at the whole table and say what's on it and where (the look tool).
+  Only name objects you actually detect; never guess.
+
 Picking things up:
 - Say you're looking, then call `pick` with what they asked for. Looking takes a
   couple of seconds.
@@ -535,6 +538,43 @@ def _pick_summary(result) -> dict:
 # the motion tools refuse uniformly so the personality still demos without an arm.
 
 
+def survey_table() -> dict:
+    """What is on the table, and which marked spot each thing is on.
+
+    ONE Gemini call for the whole catalog rather than one per object — the free
+    tier is 20 requests/day/model and a scene survey is not worth five of them.
+
+    Blocking (camera + network), so callers run it off the event loop. Never
+    raises: a vision failure comes back as an empty list with a note, so the
+    robot says "I can't see right now" instead of a tool error.
+    """
+    from armani import eyes, zones
+
+    try:
+        frame = eyes.capture_frame()
+        detections = eyes.list_visible(list(config.OBJECT_CATALOG), frame=frame)
+    except Exception as exc:
+        log.warning("look failed: %s", exc)
+        return {"objects": [], "count": 0, "note": f"my eyes aren't working right now: {exc}"}
+
+    zone_set = zones.load_zones()
+    objects: list[dict] = []
+    for detection in detections:
+        spot: str | None = None
+        # Pixel positions only mean something at the size the zones were clicked
+        # at; comparing across sizes would report confident, wrong locations.
+        if zone_set is not None and detection.frame_size == zone_set.frame_size:
+            match = zones.assign_pixel(detection.point, zone_set)
+            spot = None if match.zone is None else match.zone.label
+        objects.append({"name": detection.label, "spot": spot})
+
+    payload: dict = {"objects": objects, "count": len(objects)}
+    if not objects:
+        payload["note"] = "I can't see any of my objects on the table."
+    log_event("tool_look", **payload)
+    return payload
+
+
 def _pose_summary(pose: Action | None) -> str:
     if not pose:
         return "unknown"
@@ -644,6 +684,19 @@ def build_tools(worker: MotionWorker) -> list:
         )
 
     @function_tool
+    async def look() -> dict:
+        """Look at the whole table and report every object you can see and where it is.
+
+        Use this for "what's on the table?", "what do you see?", "list the
+        objects", or before picking something when you are not sure it is there.
+        Read-only: it looks, it never moves the arm.
+        """
+        # Read-only, like get_status: no motion, no gate, so it works in
+        # NO-MOTION mode too. Off the event loop because it is a camera read
+        # plus a Gemini call, and the model should keep talking while it looks.
+        return await asyncio.to_thread(survey_table)
+
+    @function_tool
     def get_status() -> dict:
         """Report what the arm is doing: busy or idle, pose, gestures available."""
         pose = worker.pose_snapshot()
@@ -735,7 +788,7 @@ def build_tools(worker: MotionWorker) -> list:
 
     return [
         list_gestures, play_gesture, improvise_move, go_home, get_status, stop_motion,
-        pick, answer_pick, approve_pick,
+        look, pick, answer_pick, approve_pick,
     ]
 
 
