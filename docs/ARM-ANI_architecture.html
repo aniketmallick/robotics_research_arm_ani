@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARM-ANI — Architecture</title>
+<style>
+  :root{
+    --ink:#0e1017; --ink2:#1b1f2a; --muted:#5c6473; --line:#e2e5ec; --bg:#f5f6f9; --card:#fff;
+    --brain:#4f46e5; --brain-s:#eef0fe;
+    --eye:#0f766e; --eye-s:#e5f4f2;
+    --gate:#b45309; --gate-s:#fdf2e3;
+    --ok:#15803d; --ok-s:#e7f5ec;
+    --safe:#b91c1c; --safe-s:#fdecec;
+    --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--ink);line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 20px 60px}
+
+  /* header */
+  header{background:linear-gradient(135deg,#0e1017,#1b2140);color:#fff;margin:0 -20px 30px;padding:34px 40px 30px;border-radius:0 0 20px 20px}
+  .brandrow{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  h1{font-size:30px;letter-spacing:-.02em}
+  .brandrow .sub{color:#aab3d0;font-size:14px;font-weight:500}
+  .oneliner{margin-top:12px;font-size:16.5px;color:#e8ebf5;max-width:820px;line-height:1.55}
+  .oneliner b{color:#fff}
+  .chips{margin-top:16px;display:flex;gap:8px;flex-wrap:wrap}
+  .chip{font-size:12px;font-weight:600;padding:5px 11px;border-radius:99px;background:rgba(255,255,255,.1);color:#dfe4f2;border:1px solid rgba(255,255,255,.16)}
+  .chip.hot{background:#fbbf24;color:#3a2a00;border-color:#fbbf24}
+
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:34px 0 14px;font-weight:700}
+
+  /* flow */
+  .flow{display:flex;flex-direction:column;gap:0}
+  .stage{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:15px 18px;box-shadow:0 1px 2px rgba(20,22,40,.05);position:relative}
+  .stage .tag{position:absolute;top:-9px;left:16px;font-size:10px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;padding:2px 9px;border-radius:99px;color:#fff}
+  .stage .title{font-weight:700;font-size:15.5px;display:flex;align-items:center;gap:9px;margin-top:4px}
+  .stage .desc{color:var(--muted);font-size:13px;margin-top:4px}
+  .stage .model{font-family:var(--mono);font-size:12px;font-weight:700;margin-top:7px;display:inline-block;padding:3px 9px;border-radius:7px}
+  .arrow{align-self:center;color:#aab;font-size:20px;line-height:1;padding:5px 0}
+
+  .t-brain{background:var(--brain)} .t-eye{background:var(--eye)} .t-gate{background:var(--gate)}
+  .t-body{background:#334155} .t-you{background:#0e1017} .t-log{background:#334155}
+  .m-brain{background:var(--brain-s);color:var(--brain)} .m-eye{background:var(--eye-s);color:var(--eye)}
+  .m-body{background:#eef1f6;color:#334155}
+
+  .tools{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:12px}
+  .tool{border:1px dashed var(--line);border-radius:9px;padding:8px 10px;background:#fbfbfd;font-size:12px}
+  .tool code{font-family:var(--mono);font-weight:700;color:var(--brain);font-size:12px}
+  .tool.pk code{color:var(--gate)}
+  .tool p{color:var(--muted);margin-top:2px;font-size:11.5px}
+
+  /* gates */
+  .gaterow{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+  @media(max-width:760px){.gaterow{grid-template-columns:repeat(2,1fr)}}
+  .gate{background:var(--gate-s);border:1px solid #f0dcbb;border-radius:12px;padding:12px 12px 13px}
+  .gate .g{font-weight:800;color:var(--gate);font-size:13px}
+  .gate .gt{font-weight:700;font-size:12.5px;margin-top:3px}
+  .gate .say{color:#7a5b1e;font-size:11.5px;font-style:italic;margin-top:6px;line-height:1.4}
+  .gate.v{background:var(--ok-s);border-color:#bfe3c9}
+  .gate.v .g,.gate.v .gt{color:var(--ok)} .gate.v .say{color:#2f6b43}
+  .gatecap{font-size:12.5px;color:var(--muted);margin-top:10px}
+  .gatecap b{color:var(--gate)}
+
+  /* stack table */
+  table{width:100%;border-collapse:collapse;background:var(--card);border-radius:12px;overflow:hidden;border:1px solid var(--line);font-size:13.5px}
+  th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#f0f1f6;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+  tr:last-child td{border-bottom:none}
+  td .c{font-family:var(--mono);font-size:12px;font-weight:700}
+  td.role{color:var(--muted)}
+
+  .railnote{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px}
+  .rail{flex:1 1 300px;border-radius:12px;padding:12px 15px;font-size:12.5px;border:1px solid}
+  .rail.eye{background:var(--eye-s);border-color:#bfe0db}
+  .rail.safe{background:var(--safe-s);border-color:#f2cccc}
+  .rail .h{font-weight:800;font-size:12px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
+  .rail.eye .h{color:var(--eye)} .rail.safe .h{color:var(--safe)}
+  .rail p{color:#4a5160;line-height:1.5}
+
+  footer{margin-top:34px;background:#0e1017;color:#e8ebf5;border-radius:16px;padding:24px 28px}
+  footer .big{font-size:19px;font-weight:700;line-height:1.4}
+  footer .big b{color:#fbbf24}
+  footer .small{color:#aab3d0;font-size:13px;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="brandrow">
+    <h1>ARM-ANI</h1>
+    <span class="sub">voice-native robot arm · with a trust layer</span>
+  </div>
+  <div class="oneliner">
+    A <b>speech-to-speech LLM brain</b> and a <b>vision-language model's eyes</b> on a $300 robot arm, wrapped in five
+    Python <b>"trust gates"</b> that make it clarify ambiguity, state its confidence, ask for approval when unsure,
+    and verify its own work — <b>before</b> it moves.
+  </div>
+  <div class="chips">
+    <span class="chip hot">prompts are style · gates are law</span>
+    <span class="chip">OpenAI Realtime</span>
+    <span class="chip">Gemini Robotics-ER</span>
+    <span class="chip">Claude Sonnet</span>
+    <span class="chip">LeRobot · SO-101</span>
+  </div>
+</header>
+
+<!-- ============ FLOW ============ -->
+<h2>End-to-end flow</h2>
+<div class="flow">
+
+  <div class="stage"><span class="tag t-you">Human</span>
+    <div class="title">🎙️ You speak — push-to-talk</div>
+    <div class="desc">"Take a bow." · "Pick up the red block." Wired headset, half-duplex — clean in a noisy room.</div>
+  </div>
+  <div class="arrow">▼</div>
+
+  <div class="stage"><span class="tag t-brain">Brain · speech-to-speech</span>
+    <div class="title">🧠 Realtime LLM — ears, reasoning &amp; voice in one model</div>
+    <div class="desc">Hears audio, reasons in a deadpan Gen-Z persona, speaks back in ~0.5–0.8s, and keeps talking while the arm moves. It never touches a motor — it calls tools.</div>
+    <span class="model m-brain">gpt-realtime-2.1 · OpenAI Agents SDK</span>
+  </div>
+  <div class="arrow">▼ emits a tool call</div>
+
+  <div class="stage"><span class="tag t-brain">Tools · the only way to the arm</span>
+    <div class="title">🧰 Skills the model can invoke</div>
+    <div class="tools">
+      <div class="tool"><code>play_gesture()</code><p>bow · wave · dance · nod — replayed human demos</p></div>
+      <div class="tool"><code>improvise_move()</code><p>Claude writes safe keyframes on the fly</p></div>
+      <div class="tool pk"><code>pick(object)</code><p>runs the 5 trust gates ↓</p></div>
+      <div class="tool"><code>go_home() · stop()</code><p>always available · fail-closed</p></div>
+    </div>
+  </div>
+  <div class="arrow">▼ a pick request runs the gates</div>
+
+  <div class="stage" style="border-color:#e7c99a;background:#fffdf9">
+    <span class="tag t-gate">The trust layer · in Python, not the prompt</span>
+    <div class="title">🚦 Five gates decide if — and how — to act</div>
+    <div class="gaterow" style="margin-top:12px">
+      <div class="gate"><div class="g">G1</div><div class="gt">Seen?</div><div class="say">"There's no red block here."</div></div>
+      <div class="gate"><div class="g">G2</div><div class="gt">Ambiguous?</div><div class="say">"Two cups — which one?"</div></div>
+      <div class="gate"><div class="g">G3</div><div class="gt">Reachable?</div><div class="say">"I've no taught pick for there."</div></div>
+      <div class="gate"><div class="g">G4</div><div class="gt">Confident?</div><div class="say">"34%. Approve? …no answer → stand down."</div></div>
+      <div class="gate v"><div class="g">G5</div><div class="gt">Verified?</div><div class="say">"Got it. Confirmed."</div></div>
+    </div>
+    <div class="gatecap">Gates live in <b>our code</b>, wrapped around the action — a prompt jailbreak cannot move the arm past one. The 10-second stand-down is a Python deadline, not the model choosing to wait. <b>Fail-closed by default.</b></div>
+  </div>
+  <div class="arrow">▼ only a satisfied gate proceeds</div>
+
+  <div class="stage"><span class="tag t-body">Body · motion</span>
+    <div class="title">🦾 Motion worker → SO-101 arm</div>
+    <div class="desc">One thread owns the arm; long actions run async so the robot talks while it moves. A grasp = replay of a human demo taught at that spot (learn-from-demonstration).</div>
+    <span class="model m-body">LeRobot 0.5.2 · SO-101 follower · taught-zone replay</span>
+  </div>
+  <div class="arrow">▼</div>
+
+  <div class="stage"><span class="tag t-log">Audit</span>
+    <div class="title">📊 Decision log → live "robot's mind" dashboard</div>
+    <div class="desc">Every tool call, gate decision, confidence number, approval and outcome is written to an append-only JSONL trail — the audit artifact and the screen the room watches.</div>
+  </div>
+</div>
+
+<!-- side rails -->
+<div class="railnote">
+  <div class="rail eye">
+    <div class="h">👁️ Perception — feeds G1 · G2 · G5</div>
+    <p>A single fixed webcam frame → <b>Gemini Robotics-ER 1.6</b> identifies the named object (open-vocabulary) and a pixel zone-map assigns it to a marked spot. Confidence comes from agreement across independently-worded queries, not a made-up number.</p>
+  </div>
+  <div class="rail safe">
+    <div class="h">🛡️ Safety spine — wraps every motion</div>
+    <p>Two-tier joint-limit clamps, speed-limited interpolation, workspace bounds, a freeze-first kill switch, and operator-presence checks. Nothing reaches a motor un-clamped; every default is fail-closed.</p>
+  </div>
+</div>
+
+<!-- ============ STACK ============ -->
+<h2>The stack — model by model</h2>
+<table>
+  <tr><th>Layer</th><th>Model / tech</th><th>Job</th></tr>
+  <tr><td><b>Voice + brain</b></td><td><span class="c">gpt-realtime-2.1</span><br>OpenAI Realtime (Agents SDK)</td><td class="role">One speech-to-speech model = listening, reasoning, and talking. Personality + async tool-calling ("talk while moving").</td></tr>
+  <tr><td><b>Eyes</b></td><td><span class="c">gemini-robotics-er-1.6</span><br>Google Gemini Robotics-ER</td><td class="role">Open-vocabulary object identification &amp; pointing from one RGB frame. Powers "which one?" and self-verification.</td></tr>
+  <tr><td><b>Improvised motion</b></td><td><span class="c">claude-sonnet</span><br>Anthropic</td><td class="role">Invents novel gestures as strict JSON keyframes — hard-validated and safety-clamped before they run.</td></tr>
+  <tr><td><b>Body + skills</b></td><td><span class="c">LeRobot 0.5.2</span><br>SO-ARM101</td><td class="role">Record &amp; replay of human teleop demos for gestures and grasps. Degrees; every target clamped &amp; interpolated.</td></tr>
+  <tr><td><b>Trust layer</b></td><td><span class="c">gates.py</span><br>our code (the moat)</td><td class="role">Five ordered gates — seen · ambiguous · reachable · confident+approval+timeout · verified — enforced in Python.</td></tr>
+</table>
+
+<footer>
+  <div class="big">Everyone is building robots that <b>act</b> on command.<br>We built one that knows when <b>not to</b> — and asks.</div>
+  <div class="small">The interaction &amp; trust layer for embodied AI. Research lineage: KnowNo (CoRL 2023 best paper) · SayCan · Inner Monologue — productized on $300 hardware. Roadmap: continuous pick-anywhere (vision → interpolated demonstrations), conformal-calibrated confidence, fleet audit logs.</div>
+</footer>
+
+</div>
+</body>
+</html>
