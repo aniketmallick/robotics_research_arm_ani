@@ -178,3 +178,53 @@ def test_the_instruction_matches_how_you_actually_talk_to_it():
 
     assert "spacebar" in run_agent._greeting_instruction(text_mode=False)
     assert "type" in run_agent._greeting_instruction(text_mode=True)
+
+
+# --- post-action brevity -------------------------------------------------
+
+
+def test_a_finished_action_asks_for_one_short_line():
+    """The persona says it, but a finished move is exactly when the model wants
+    to recap — so the reminder rides along with the event."""
+    import run_agent
+
+    summary = run_agent._completion_summary(
+        agent.Completion(action="gesture bow", status="done")
+    )
+    assert "gesture bow" in summary
+    assert "done" in summary
+    assert summary.endswith(run_agent.REACT_BRIEFLY)
+
+
+def test_the_detail_survives_the_brevity_suffix():
+    """The honest outcome must still reach the model — especially a failure."""
+    import run_agent
+
+    summary = run_agent._completion_summary(
+        agent.Completion(
+            action="pick red block", status="failed",
+            detail="I ran the move but I couldn't move the red block.",
+        )
+    )
+    assert "couldn't move the red block" in summary
+    assert summary.endswith(run_agent.REACT_BRIEFLY)
+
+
+def test_persona_covers_the_new_behaviour():
+    assert "ONE short line" in agent.PERSONA
+    assert "Never narrate or explain what you just did" in agent.PERSONA
+    assert "Hinglish is a garnish, not the meal" in agent.PERSONA
+
+
+def test_persona_keeps_the_humour_a_garnish_not_a_rule_change():
+    """The safety-shaped rules must not have been disturbed by a tone edit."""
+    # Fragments, not sentences: PERSONA is hard-wrapped, so anything long
+    # enough to cross a line break would fail on formatting alone.
+    for rule in (
+        "ALWAYS announce a movement",
+        "BEFORE you call the tool",
+        "Never claim an ability you don't have",
+        "If you didn't, SAY SO",
+        "never round it",
+    ):
+        assert rule in agent.PERSONA

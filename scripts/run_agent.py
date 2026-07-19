@@ -259,6 +259,21 @@ async def _pump_events(session, worker: agent.MotionWorker, *, text_mode: bool) 
 
 
 
+# Appended to every finished-action report. The persona already says to react in
+# one line, but a finished move is exactly the moment the model wants to recap
+# what it just did — so the reminder rides along with the event itself, where it
+# is hardest to ignore. Normal conversation never sees this.
+REACT_BRIEFLY = " (react in one very short line, then wait for the next command)."
+
+
+def _completion_summary(done: agent.Completion) -> str:
+    """What the model is told when an action ends."""
+    summary = f"[motion:{done.action}] {done.status}"
+    if done.detail:
+        summary += f" — {done.detail}"
+    return summary + REACT_BRIEFLY
+
+
 async def _pump_completions(session, worker: agent.MotionWorker) -> None:
     """Feed finished-motion results back to the model so it can react."""
     try:
@@ -268,11 +283,8 @@ async def _pump_completions(session, worker: agent.MotionWorker) -> None:
             except Exception:
                 await asyncio.sleep(0.1)
                 continue
-            summary = f"[motion:{done.action}] {done.status}"
-            if done.detail:
-                summary += f" — {done.detail}"
             # System-role context so the model comments naturally, not as the user.
-            await session.send_message(summary)
+            await session.send_message(_completion_summary(done))
     except asyncio.CancelledError:
         pass
 
