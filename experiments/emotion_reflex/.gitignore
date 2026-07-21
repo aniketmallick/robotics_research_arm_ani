@@ -1,0 +1,5 @@
+# Detector venv and downloaded models — heavy, machine-local, never committed.
+.venv/
+models/*.onnx
+__pycache__/
+.pytest_cache/

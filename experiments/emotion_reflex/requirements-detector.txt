@@ -1,0 +1,7 @@
+# Detector-only deps, for experiments/emotion_reflex/.venv — NOT the lerobot env.
+# Keep this minimal: heavy stacks (tensorflow, deepface, mediapipe) are avoided
+# on purpose. Verified working on macOS with Python 3.9.6:
+#   cv2 5.0.0 | numpy 2.0.2 | onnxruntime 1.19.2 (CoreML + CPU)
+opencv-python
+onnxruntime
+numpy
