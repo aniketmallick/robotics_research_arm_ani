@@ -1,0 +1,4 @@
+# Transient run artifacts: pip/install/bench/probe logs and per-episode JSONL.
+# The deliverables (env_report.md, the env snapshot) live one level up and ARE tracked.
+*.log
+*.jsonl
