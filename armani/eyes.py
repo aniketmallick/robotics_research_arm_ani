@@ -202,6 +202,20 @@ PROMPT_VARIANTS: tuple[str, ...] = (
     "on the part a robot gripper should grasp. " + _POINT_FORMAT,
 )
 
+# Spike S1: the camera views the table at an angle, so a point on an object's
+# visual CENTRE sits above the table plane and the homography maps it to a spot
+# BEHIND the object (parallax). Asking for the point where the object meets the
+# table removes most of that bias. Selected by locate(contact_point=True); the
+# default behaviour is unchanged.
+CONTACT_PROMPT_VARIANTS: tuple[str, ...] = (
+    "Point to where the {objects} TOUCHES THE TABLE — the spot on the table "
+    "surface at the base of the object, where it meets the table, NOT its top "
+    "or its visual centre. " + _POINT_FORMAT,
+    "Find the {objects}. Give the single point on the TABLE SURFACE directly "
+    "under the object, at its contact point with the table (the base, not the "
+    "top). " + _POINT_FORMAT,
+)
+
 # Deliberately NOT str.format: these prompts contain literal JSON braces, and
 # format() reads {"point"} as a replacement field and raises KeyError. That bug
 # broke every call to locate() until a unit test caught it.
@@ -459,11 +473,20 @@ def _agreement(points: list[tuple[int, int]]) -> float:
 # --- Public API ----------------------------------------------------------
 
 
-def locate(object_name: str, frame=None, samples: int | None = None) -> Detection | None:
+def locate(
+    object_name: str,
+    frame=None,
+    samples: int | None = None,
+    contact_point: bool = False,
+) -> Detection | None:
     """Find one named object. None means "not seen", which is a normal answer.
 
     Asks ``samples`` independently-worded questions and fuses the answers; see
     the module docstring for what the confidence means.
+
+    ``contact_point`` (Spike S1) asks for the point where the object meets the
+    TABLE rather than its visual centre, which reduces parallax bias for a
+    homography-based reach. It defaults to False — the demo path is unchanged.
     """
     if not object_name or not object_name.strip():
         raise ValueError("object_name is empty")
@@ -479,6 +502,7 @@ def locate(object_name: str, frame=None, samples: int | None = None) -> Detectio
     frame_size = (width, height)
     jpeg = encode_jpeg(frame)
 
+    variants = CONTACT_PROMPT_VARIANTS if contact_point else PROMPT_VARIANTS
     points: list[tuple[int, int]] = []
     self_reports: list[float] = []
     raws: list[str] = []
@@ -486,7 +510,7 @@ def locate(object_name: str, frame=None, samples: int | None = None) -> Detectio
     most_candidates = 0
 
     for index in range(samples):
-        prompt = render_prompt(PROMPT_VARIANTS[index % len(PROMPT_VARIANTS)], object_name)
+        prompt = render_prompt(variants[index % len(variants)], object_name)
         model_used, raw = _ask(jpeg, prompt)
         raws.append(raw)
         try:
