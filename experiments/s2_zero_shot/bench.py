@@ -90,6 +90,11 @@ def bench_device(device: str, policy, spec) -> dict:
         pretrained_path=smolvla_io.MODEL_ID,
         preprocessor_overrides={"device_processor": {"device": device}},
     )
+    # These are freshly-built processors, so route the per-dataset stats here too
+    # (otherwise unnormalization silently no-ops and sample_action is raw normalized
+    # values — the exact bug check_stats.py guards against).
+    smolvla_io.route_dataset_stats(preprocessor, spec.stats_dataset)
+    smolvla_io.route_dataset_stats(postprocessor, spec.stats_dataset)
 
     frame = smolvla_io.build_frame({j: 0.0 for j in smolvla_io.JOINT_ORDER}, camera.synthetic_frame(0), TASK, spec)
 

@@ -29,15 +29,21 @@ conda create -y -n lerobot-vla python=3.12
 The demo `lerobot` env gets **zero** new packages. Resolved versions are written
 to `env_report.md` by the benchmark below.
 
-## Part A — headless benchmark (no robot, no camera)
+## Part A — headless benchmark + measurement-integrity check (no robot, no camera)
 
 ```bash
-$PY -m experiments.s2_zero_shot.bench            # MPS + CPU latency, feature spec
+$PY -m experiments.s2_zero_shot.bench            # MPS + CPU latency, feature spec -> env_report.md
+$PY -m experiments.s2_zero_shot.check_stats      # verifies the action unnormalize stats loaded
 ```
 
-Writes `env_report.md` (versions, the checkpoint's real feature spec, load time,
-per-device inference latency, and a sample action so you can eyeball whether
-outputs look like plausible degrees or normalized noise).
+`bench` writes `env_report.md` (versions, feature spec, load time, per-device
+latency, sample action). `check_stats` answers the question that decides whether a
+"no motion" result is real or a harness bug: **did the action unnormalize stats
+load?** `smolvla_base` is multi-embodiment and keys its stats per pretraining
+dataset (`so100.buffer.action`, …), so we route one dataset's stats onto the bare
+`action` key (default `so100`, override `ARMANI_SMOLVLA_STATS_DATASET`). If the
+printed action mean/std are absent, the outputs are raw normalized values — a bug,
+not a baseline.
 
 ## Part B/C — the trials (operator + arm)
 
@@ -49,9 +55,10 @@ export ARMANI_CAMERA_INDEX=0        # whatever the C920 is
 
 ### 1. Observe-only first — ALWAYS (nothing moves)
 
-Sanity-check the printed actions before ever enabling motion. Body joints should
-read as degrees in a sane range; the gripper 0–100. If they look normalized
-(−1..1, or ±100 on body joints), STOP — the stats/unnormalization path is wrong.
+Sanity-check the printed actions before ever enabling motion. With stats routed
+(above), the raw actions come out in the base model's **so100 servo-degree**
+convention (tens to ~200°) — NOT −1..1. If you see values ≤ ~1 on the body joints,
+the stats did not route (run `check_stats`); STOP and fix that first.
 
 ```bash
 # headless, no camera/arm — proves the pipeline runs:
@@ -61,8 +68,11 @@ $PY -m experiments.s2_zero_shot.run_zero_shot --no-arm --synthetic-frame --secon
 $PY -m experiments.s2_zero_shot.run_zero_shot --seconds 15
 ```
 
-Watch the `clamp bit` rate in the summary — how often the untuned policy pushed a
-joint out of bounds.
+Watch the `clamp bit` rate — expect it **high and body-joint-dominated**
+(`shoulder_lift`/`elbow_flex`/`wrist_roll` saturating), because the so100-convention
+targets sit far outside our ±60/90 envelope. That saturation means `--live` will
+drive the arm **decisively to one fixed clamped pose** (not gentle drift) — bounded
+and speed-limited by the clamp + interp, hand on ESC.
 
 ### 2. One LIVE episode — operator present, hand on ESC
 

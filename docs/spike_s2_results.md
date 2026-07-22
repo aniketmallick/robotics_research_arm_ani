@@ -48,9 +48,10 @@ Full versions + the generated latency table: `experiments/s2_zero_shot/env_repor
 - **action_dim 6** — mapped **positionally** onto our JOINTS order (shoulder_pan,
   shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper). This is an OOD
   assumption: the base model's joint order/sign/units are its training arm's, not
-  ours, and the action is unnormalized with the checkpoint's OWN stats — so
-  targets land in the base model's space, not our calibration. The policy clamp is
-  what keeps that safe.
+  ours. The action is unnormalized with the checkpoint's OWN stats (see
+  *Measurement integrity* below — those stats are keyed per pretraining dataset and
+  had to be routed), so targets land in the base model's convention, not our
+  calibration. The policy clamp is what keeps that safe.
 - **three cameras** (`camera1/2/3`). The checkpoint *declares* a 3×256×256 input
   shape per camera, but SmolVLA resizes-and-pads every image to 512×512 before the
   encoder, so the declared size is not load-bearing. We have one C920, so the same
@@ -66,31 +67,62 @@ Full versions + the generated latency table: `experiments/s2_zero_shot/env_repor
 | chunk inference — one-shot | **565 ms** | 9 841 ms |
 | chunk inference — steady mean | **503 ms** | 10 712 ms |
 | amortized per control step (÷50) | **10.1 ms** | 214 ms |
-| sample-action absmax | 0.80 | 0.37 |
+| sample-action absmax (unnormalized) | ≈ so100 mean (~120–130) | ~120 |
 
-Full table + versions: `experiments/s2_zero_shot/env_report.md`.
+Full table + versions: `experiments/s2_zero_shot/env_report.md`. (The sample-action
+magnitudes are post-fix — see *Measurement integrity* below; pre-fix they were
+~0.8, which was the un-normalization bug, not the model.)
 
 **Read of the numbers:** MPS supports a ~10 Hz control loop comfortably (the 503 ms
 chunk inference amortizes over 50 popped steps to ~10 ms/step, with a visible
 ~0.5 s hitch each time the chunk refills). CPU is ~21× slower — a ~10 s stall per
 chunk — so **not** real-time viable; MPS is the only sane device here.
 
-**The OOD signal (important).** The postprocessed action for a synthetic frame +
-zero state is small and varies run-to-run:
+**Compute-tier verdict (banked):** 503 ms/chunk on MPS with 50-step chunks = a
+SmolVLA-class System-1 policy runs **in real time on the M1 Max alone** — no
+procurement needed for this tier, exactly as projected. **MPS is load-bearing:**
+CPU-only at 10.7 s/chunk is dead, so the answer depends on Metal being available.
 
-- MPS sample: `[0.08, 0.42, 0.22, 0.15, 0.80, -0.31]`
-- CPU sample: `[0.375, 0.05, 0.33, -0.22, 0.35, -0.29]`
+## Measurement integrity (Q1) — the un-normalization bug we caught and fixed
 
-All components sit in ~[-0.6, 1.7] across steps (see the headless log). **By the
-project's own tripwire this already trips "STOP":** the README says if the body
-joints look normalized (−1..1) the unnormalization/stats path is suspect, and
-absmax ≤ 0.8 with logged raw body-joint values ≤ ~1.7 is exactly that. If read as
-**degrees** the arm barely moves; the 6th component maps to our **gripper
-(0–100 %)** and comes out negative. It is not *proof* the stats path is broken —
-the base model may simply emit near-mean actions on a wildly OOD input — but it is
-the #1 thing the operator must eyeball in a **real-camera** observe-only run before
-going live. Either way the values are small and the clamp bounds them, so `--live`
-is safe.
+Before trusting anything as a "zero-shot result," we verified the harness actually
+maps the policy's output back to joint space. **At first it did not — and the fix
+changes the story.** (This check was the reviewer's blocker; it was the right call.)
+
+`smolvla_base` is **multi-embodiment**: its normalize/unnormalize stats are keyed
+per pretraining dataset (`so100.buffer.action`, `so100-red.buffer.action`,
+`so100-blue.buffer.action`), never the bare `action` key our runner looks up.
+lerobot's normalizer **silently returns the tensor unchanged** when the key is
+missing (no error), so the first pass fed the model's **raw normalized output**
+(|·| ≤ ~1) to the arm as if it were joint degrees. That "small, normalized-looking"
+signal was OUR bug wearing a zero-shot costume — exactly what the review flagged.
+
+**Fix (`smolvla_io.route_dataset_stats`):** select one pretraining dataset's stats
+(`so100`, overridable via `ARMANI_SMOLVLA_STATS_DATASET`) and alias them onto the
+bare feature keys, for BOTH the input state-normalizer and the output
+action-unnormalizer. Verified by `check_stats.py`: action stats now load
+(mean `[1.6, 120, 110, 57, -27, 12]`, std `[26, 52, 50, 37, 59, 19]`) and the
+unnormalize is genuine. Covered by two headless unit tests.
+
+(Note: this checkpoint's shared stats file carries **action stats only**, so input
+**state normalization is also a no-op** — state is fed raw. It doesn't change the
+result: the model ignores the scene regardless, and only the action path reaches the
+motors. `check_stats.py` reports this explicitly.)
+
+**What the fixed model actually does** (headless, synthetic AND the real
+`logs/last_frame.jpg` table image): the **normalized** output sits near 0 on every
+joint (|·| ≤ ~0.3, and ≤ 0.17 on the real image) — i.e. **the model regresses to
+its pretraining mean pose and essentially ignores the scene.** Unnormalized, that
+mean is in the **so100 servo-degree convention** (shoulder_lift ~120°, elbow ~110°,
+wrist_roll ~−27°), a *different convention* from our SO-101 centred degrees
+(±60/90). So the honest baseline is a **cross-convention, regress-to-mean** failure:
+one fixed foreign-convention pose, scene-invariant.
+
+**Live-safety consequence:** those ~110–200° targets sit far outside our envelope,
+so the policy clamp **saturates** (shoulder_lift/elbow → 60°, wrist_roll → 150°).
+The arm will drive *decisively* to one fixed clamped pose and hold — bounded and
+speed-limited by the safety stack, but a real, large motion. Operator: expect a
+snap-to-one-pose, not gentle drift, on `--live`.
 
 ## Part B/C — the trials (NEEDS THE OPERATOR + ARM)
 
@@ -118,26 +150,29 @@ Alternate phrasings:
 | "Pick up the block and lift it" | TODO | TODO | |
 
 - **Clamp-hit rate (live):** TODO % of steps had ≥1 joint clamped. Worst joints: TODO.
-- **Headless preview (synthetic frame, observe-only, 48 steps):** the clamp bit on
-  **42/48 steps (88 %)**, *every one on the gripper* — the base model's 6th action
-  component is negative (~−0.3 to −0.6), clamped up to 0. The five body-joint
-  targets were small enough to stay inside the policy envelope and did not clamp.
-  **Read this carefully:** that 88 % is a gripper **unit artifact** (a normalized
-  value hitting our 0–100 % floor), NOT body joints leaving the degree envelope —
-  do not cite it as evidence of wild degree-space motion. This is a preview only;
-  the live rate on the real C920 is the number that counts.
+- **Headless preview (synthetic frame, observe-only, post-fix, 49 steps):** the clamp
+  bit on **49/49 steps (100 %)** — `shoulder_lift` and `elbow_flex` on every step
+  (raw ~110–205° → clamped to 60°), `wrist_roll` on every step (raw ~250° → 150°),
+  plus `wrist_flex`/`gripper` on most. This is the real signal: the so100-convention
+  targets sit far outside our envelope, so the clamp saturates the body joints — the
+  arm would drive to one fixed clamped pose. (Pre-fix this was a misleading
+  gripper-only 88 %; that was the un-normalization bug.) The live rate on the real
+  C920 is the number that counts.
 - **Evidence kept:** TODO (paths / video).
 
 ## Conclusion (3 sentences — fill after the arm run)
 
-**TODO after the 10 live trials.** Draft skeleton to complete with real numbers:
-On this arm/camera the untuned SmolVLA base scored a mean of **TODO/4** across 10
-trials (best trial: **TODO**). The dominant failure mode was **TODO** (e.g. no
-purposeful motion / motion toward a wrong location / thrashing), which is what a
-domain-specific fine-tune (Spike S3) must fix. This establishes the baseline:
-**any** S3 result above mean **TODO/4** is a measurable improvement.
+**Predicted from the headless measurement (confirm on hardware):** untuned
+`smolvla_base` **regresses to its pretraining mean pose and ignores the object** —
+its normalized output is ~0 regardless of the image, so it emits one fixed pose in
+the foreign **so100 servo-degree** convention, which the clamp saturates against our
+±60/90 envelope. Predicted trial outcome: **score ~0** (no task-directed motion) on
+most/all trials; the arm snaps to a fixed clamped pose. That is the honest baseline
+Spike S3 (fine-tuning on our teleop data, in our convention) must beat — **any**
+task-directed behavior is a measurable improvement over regress-to-mean.
 
-> When reporting the clamp-bit rate, split it: the headless preview shows the bite
-> is **gripper-only** (a normalized-vs-percent unit artifact), so a high overall
-> rate is NOT by itself evidence of large body-joint motion. State the per-joint
-> breakdown (`per_joint_bit_counts` in the summary record), not just the headline %.
+**TODO after the 10 live trials:** confirm the above, fill the mean score, note
+whether alt phrasings change anything (unlikely, given scene-invariance), and record
+the live clamp-bit **per-joint** breakdown (`per_joint_bit_counts` in the summary
+record) — expect it dominated by `shoulder_lift`/`elbow_flex`/`wrist_roll`
+saturation, NOT the gripper.

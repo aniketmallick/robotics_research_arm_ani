@@ -206,6 +206,7 @@ def _spec(action_dim=6, state_dim=6):
     return smolvla_io.PolicySpec(
         image_keys=("observation.images.camera1", "observation.images.camera2", "observation.images.camera3"),
         state_dim=state_dim, action_dim=action_dim, chunk_size=50, device="cpu",
+        stats_dataset="so100", routed_features=("observation.state", "action"),
     )
 
 
@@ -234,6 +235,40 @@ def test_build_frame_keys_and_shapes():
         assert key in frame
         assert tuple(frame[key].shape) == (3, camera.CAMERA_HEIGHT, camera.CAMERA_WIDTH)
         assert 0.0 <= float(frame[key].min()) and float(frame[key].max()) <= 1.0
+
+
+class _FakeStatsStep:
+    """Mimics a lerobot normalizer step with per-dataset-prefixed stats."""
+
+    def __init__(self):
+        self.features = {"action": object(), "observation.state": object()}
+        self._tensor_stats = {
+            "so100.buffer.action": {"mean": 1, "std": 2},
+            "so100.buffer.observation.state": {"mean": 3, "std": 4},
+            "so100-red.buffer.action": {"mean": 9, "std": 9},
+        }
+        self.stats = {"so100.buffer.action": {"mean": [1], "std": [2]}}
+
+
+class _FakePipe:
+    def __init__(self, step):
+        self.steps = [step]
+
+
+def test_route_dataset_stats_aliases_prefixed_keys():
+    step = _FakeStatsStep()
+    routed = smolvla_io.route_dataset_stats(_FakePipe(step), "so100")
+    assert set(routed) == {"action", "observation.state"}
+    # the bare key now points at the chosen dataset's tensor stats
+    assert step._tensor_stats["action"] is step._tensor_stats["so100.buffer.action"]
+    assert step._tensor_stats["observation.state"] is step._tensor_stats["so100.buffer.observation.state"]
+    assert step.stats["action"] is step.stats["so100.buffer.action"]  # numpy mirror aliased too
+
+
+def test_route_dataset_stats_missing_dataset_routes_nothing():
+    step = _FakeStatsStep()
+    assert smolvla_io.route_dataset_stats(_FakePipe(step), "does-not-exist") == []
+    assert "action" not in step._tensor_stats  # nothing aliased
 
 
 def test_synthetic_frame_varies_by_step():

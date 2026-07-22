@@ -34,6 +34,20 @@ log = logging.getLogger("s2.smolvla_io")
 
 MODEL_ID = "lerobot/smolvla_base"
 
+# smolvla_base is MULTI-EMBODIMENT: its normalize/unnormalize stats are keyed per
+# PRETRAINING dataset ("<dataset>.buffer.<feature>"), never the bare feature name
+# ("action", "observation.state") our runner uses. Unrouted, every lookup misses
+# and normalization is a SILENT no-op (line "key not in _tensor_stats -> return
+# tensor" in normalize_processor.py) — the model then sees raw state and emits raw
+# normalized actions that we'd hand to the motors as if they were joint targets.
+# Zero-shot inference therefore has to PICK one pretraining dataset's stats. so100
+# is the closest embodiment to our SO-101; the choice is inherently arbitrary and
+# is part of the out-of-distribution story (the resulting convention is the base
+# arm's, not ours). Override via ARMANI_SMOLVLA_STATS_DATASET.
+import os as _os
+
+PRETRAIN_DATASET = _os.getenv("ARMANI_SMOLVLA_STATS_DATASET", "so100")
+
 # Our canonical joint order (matches armani.config.JOINTS). The action vector is
 # mapped onto these positionally. Kept as a local constant so this module has no
 # hard import dependency on armani beyond what the clamp already pulls in.
@@ -56,21 +70,60 @@ class PolicySpec:
     action_dim: int
     chunk_size: int
     device: str
+    stats_dataset: str  # which pretraining dataset's stats we routed to (OOD choice)
+    routed_features: tuple[str, ...]  # features whose stats were successfully routed
 
     def summary(self) -> str:
         return (
             f"smolvla_base on {self.device}: state_dim={self.state_dim}, "
             f"action_dim={self.action_dim}, chunk={self.chunk_size}, "
-            f"cameras={list(self.image_keys)}"
+            f"cameras={list(self.image_keys)}, stats={self.stats_dataset} "
+            f"(routed {list(self.routed_features)})"
         )
 
 
-def load(device: str) -> tuple[Any, Any, Any, PolicySpec]:
+def stats_step(pipeline: Any) -> Any | None:
+    """Return a pipeline's stats-bearing (normalizer / unnormalizer) step, or None."""
+    for step in getattr(pipeline, "steps", None) or []:
+        if isinstance(getattr(step, "stats", None), dict):
+            return step
+    return None
+
+
+def route_dataset_stats(pipeline: Any, dataset: str) -> list[str]:
+    """Alias ``<dataset>.buffer.<feature>`` stats onto the bare ``<feature>`` key the
+    transform actually looks up. Returns the feature keys successfully routed.
+
+    Without this the multi-embodiment checkpoint's stats never match and
+    normalization silently no-ops (see PRETRAIN_DATASET). Aliasing both the tensor
+    stats (used by the transform) and the numpy mirror keeps the step consistent.
+    """
+    step = stats_step(pipeline)
+    if step is None:
+        return []
+    tensor_stats = getattr(step, "_tensor_stats", None)
+    if tensor_stats is None:
+        return []
+    numpy_stats = getattr(step, "stats", {}) or {}
+    routed: list[str] = []
+    for feature in list(getattr(step, "features", {}) or {}):
+        source = f"{dataset}.buffer.{feature}"
+        if feature not in tensor_stats and source in tensor_stats:
+            tensor_stats[feature] = tensor_stats[source]
+            if source in numpy_stats:
+                numpy_stats[feature] = numpy_stats[source]
+            routed.append(feature)
+    return routed
+
+
+def load(device: str, dataset: str = PRETRAIN_DATASET) -> tuple[Any, Any, Any, PolicySpec]:
     """Load the policy + pre/post processors on ``device``. Returns (policy, pre, post, spec).
 
     The checkpoint bakes ``device="cuda"`` into its processor config; we override
     the device_processor step at build time exactly as lerobot's own eval script
-    does, otherwise the build asserts CUDA and crashes on this Mac.
+    does, otherwise the build asserts CUDA and crashes on this Mac. We then route
+    ``dataset``'s per-embodiment stats onto the bare feature keys so normalization
+    actually runs (see PRETRAIN_DATASET) — otherwise it is a silent no-op.
     """
     import torch
     from lerobot.policies.factory import make_pre_post_processors
@@ -88,6 +141,14 @@ def load(device: str) -> tuple[Any, Any, Any, PolicySpec]:
         preprocessor_overrides={"device_processor": {"device": device}},
     )
 
+    routed = route_dataset_stats(preprocessor, dataset) + route_dataset_stats(postprocessor, dataset)
+    if "action" not in routed:
+        log.error(
+            "action stats NOT routed for dataset %r — the unnormalize step is a no-op and outputs "
+            "are raw normalized values. Check ARMANI_SMOLVLA_STATS_DATASET against the checkpoint's "
+            "'<ds>.buffer.action' keys.", dataset,
+        )
+
     image_keys = tuple(cfg.image_features)
     state_dim = int(cfg.input_features["observation.state"].shape[0])
     action_dim = int(cfg.action_feature.shape[0])
@@ -97,6 +158,8 @@ def load(device: str) -> tuple[Any, Any, Any, PolicySpec]:
         action_dim=action_dim,
         chunk_size=int(cfg.chunk_size),
         device=device,
+        stats_dataset=dataset,
+        routed_features=tuple(routed),
     )
     if state_dim != len(JOINT_ORDER):
         log.warning(
@@ -165,13 +228,15 @@ def action_to_joints(vector: np.ndarray, spec: PolicySpec) -> dict[str, float]:
     return {JOINT_ORDER[i]: float(vector[i]) for i in range(n)}
 
 
-def make_infer_fn(device: str) -> tuple[Callable[[dict[str, float], np.ndarray, str], dict[str, float]], PolicySpec]:
+def make_infer_fn(
+    device: str, dataset: str = PRETRAIN_DATASET
+) -> tuple[Callable[[dict[str, float], np.ndarray, str], dict[str, float]], PolicySpec]:
     """Load once, return (infer_fn, spec). ``infer_fn(state, frame_bgr, task) -> raw joint action``.
 
     The policy's internal action queue (temporal chunking) persists across calls,
     so it is reset exactly once here at the start of the episode.
     """
-    policy, preprocessor, postprocessor, spec = load(device)
+    policy, preprocessor, postprocessor, spec = load(device, dataset)
     policy.reset()
 
     def infer_fn(state_by_joint: dict[str, float], bgr: np.ndarray, task: str) -> dict[str, float]:

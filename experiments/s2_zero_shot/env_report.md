@@ -26,17 +26,17 @@ the real `armani.safety.clamp_action`; the demo env got zero new packages.
 - action_dim: **6** (mapped positionally onto our 6 joints — OOD)
 - cameras expected: **['observation.images.camera1', 'observation.images.camera2', 'observation.images.camera3']** (we feed the one C920 frame to all)
 - chunk_size / n_action_steps: **50**
-- model construct + load time: **25.2 s**
+- model construct + load time: **25.3 s**
 
 ## Latency (synthetic observation)
 
 | device | move to dev (s) | one-shot chunk (ms) | steady mean (ms) | steady p90 (ms) | amortized /step (ms) | sample action absmax |
 |---|---|---|---|---|---|---|
-| mps | 0.0 | 565 | 503 | 517 | 10.1 | 0.80 |
-| cpu | 0.2 | 9841 | 10712 | 11181 | 214.2 | 0.37 |
+| mps | 0.0 | 532 | 528 | 531 | 10.6 | 123.17 |
+| cpu | 0.2 | 10914 | 11571 | 11815 | 231.4 | 120.09 |
 
 `sample action` (postprocessed, one call) per device — the honest OOD signal
 (plausible degrees vs normalized noise):
 
-- **mps**: [0.07999999821186066, 0.4189999997615814, 0.22300000488758087, 0.14800000190734863, 0.796999990940094, -0.3070000112056732]
-- **cpu**: [0.375, 0.04600000008940697, 0.3330000042915344, -0.22200000286102295, 0.3529999852180481, -0.2939999997615814]
+- **mps**: [0.5289999842643738, 123.17500305175781, 120.13700103759766, 56.599998474121094, -11.480999946594238, 9.609000205993652]
+- **cpu**: [0.0010000000474974513, 120.09400177001953, 114.83899688720703, 51.034000396728516, -1.0720000267028809, 2.5299999713897705]
