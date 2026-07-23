@@ -29,15 +29,17 @@ Synthetic / rendered-board (verified by me, no hardware):
 | pixel→robot→pixel round-trip (matrix sanity) | ~5e-13 px |
 | hover dry-run chain for a synthetic pixel | pixel (320,240) → robot (0.300, 0.000) m → IK reachable, 6.8 mm IK error, 30° lean |
 
-Real hardware (NEEDS THE OPERATOR — fill in):
+Real hardware (measured 2026-07-23 — operator's `--run` + hover; calibration values
+from `armani/data/homography.json`):
 
 | quantity | value | how |
 |---|---|---|
-| board homography RMS (printed board, C920) | **TODO px** | `calibrate_charuco.py --run`, step 1 (gate ≤10 px) |
-| per-corner tip residuals | **TODO / TODO / TODO mm** | `--run`, step 3 (target <5 mm) |
-| ruler end-to-end error at 2 board corners | **TODO cm** | `--check --live-corners` |
-| hover hits within ~1.5 cm | **TODO / 5** | `hover_object.py --object X --live`, 5 objects |
-| parallax residual on the tallest object | **TODO cm** | note per object; expect 1–2 cm regardless |
+| printed square (scale correction) | **31.5 mm**, not the assumed 30 mm — a ~5% scale error | ruler; the distance-consistency gate REFUSED the save until `ARMANI_CHARUCO_SQUARE_MM=31.5` was set |
+| board homography RMS | **0.15 px** (24/24 corners) | `--run` step 1 (gate ≤10 px) |
+| per-corner tip residuals | **5.21 / 3.80 / 2.78 mm** (mean 3.93) | `--run` step 3 — all under the 10 mm save gate |
+| ruler end-to-end error | **0.15 cm** near corner, **0.8 cm** far corner | `--check --live-corners`; error grows with reach (5-DOF lean at extension) |
+| hover on flat/short objects | **within ~1.5 cm** ✓ | `hover_object.py --live` |
+| hover on a tall bottle | **XY correct, fixed hover-Z collided** (swept in, pushed it) | 2.5D limit — a depth/height problem, NOT an XY/parallax miss |
 
 ## Operator runbook
 
@@ -149,11 +151,22 @@ record it, don't fight it.
 
 ## Conclusion
 
-**TODO after the print + arm run.** The math is sound and well-conditioned: on a
-clean board the pixel→board fit is sub-pixel and the rigid composition is exact
-to microns, so the remaining error budget is entirely (a) the printed-square
-measurement, (b) the 3 tip touches, and (c) parallax. Whether that lands under
-1.5 cm is the number the operator produces in steps 4–7. If board RMS comes back
-in single digits and tip residuals under 5 mm, the ~1.5 cm target is plausible;
-if RMS is >10 px the board or camera geometry is the problem, not the method —
-stop and report per the time-box rule.
+The pixel→robot map is **excellent** — 0.15 px board RMS, scale verified to <0.5 mm
+(31.5 mm by ruler), tip residuals 5.2 / 3.8 / 2.8 mm. **Three defects were caught by
+the gates and REFUSED rather than shipped:** the board-frame *handedness* (mirror)
+bug, the *fail-open save* (warn-but-save), and the print-*scale* error (30 vs
+31.5 mm — the distance-consistency gate blocked the save until it was corrected).
+None reached a hover.
+
+**VERDICT — PASS on the XY question.** The modular pipeline (Gemini point →
+homography → IK) hovers **within ~1.5 cm on flat/short objects**. But it is
+**2.5D**: it has no height/depth knowledge, so a *fixed* hover-Z sweeps into a tall
+object — the bottle was correctly identified and XY-correct, then the fixed Z
+collided with it and pushed it (a **collision, not an XY miss**). End-to-end error
+also grows with reach (0.15 → 0.8 cm, near → far) from 5-DOF lean at extension.
+
+This empirically motivates the **depth track (S6, iPhone / Record3D)** and confirms
+the near-vertical-approach limit of a 5-DOF arm noted in CLAUDE.md. **Grasp-grade
+top-down manipulation needs depth + orientation, not a better homography.** The
+registration question is closed on evidence; the manipulation question moves to the
+depth track.
