@@ -85,7 +85,19 @@ additive fixes:
   teardown segfault. If it still fires after work completes, it corrupts nothing.
 - **Kill-switch honesty:** each `--live` path now prints a LOUD warning if the ESC
   listener is not trusted (Input Monitoring not granted) — ESC is dead, only Ctrl-C
-  freezes. Same `IS_TRUSTED` check the preflight uses. Warn, don't block.
+  freezes. The trust check queries `AXIsProcessTrusted()` directly
+  (`safety.esc_listener_trusted`); reading `Listener.IS_TRUSTED` off the *class* is
+  a permanently-False default that cried wolf on every run (a HIGH the adversarial
+  review caught), so `preflight.py` was fixed to share this one correct check.
+  Warn, don't block.
+
+> **TODO — next recalibration only; do NOT re-run anything now.** The two margins
+> fight: the ChArUco path SHRINKS the hull by `TABLE_MARGIN_M` (20 mm) at build,
+> then the check DILATES it back by 25 mm. That round-trip is a trap for a future
+> reader. The clean endgame is `TABLE_MARGIN_M = 0` for the ChArUco path — the hull
+> is already conservative (it is the board, not the table edge) — plus a ~10 mm
+> check margin. Apply this ONLY at the next recalibration, never retroactively (the
+> current saved 0.1 px map stays as-is).
 
 ## Parallax
 
