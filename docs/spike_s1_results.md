@@ -124,11 +124,15 @@ guard (correctly) refuses, producing garbage residuals.
   touch preserves distance, so a single mis-touch that Procrustes *averages* into a
   sub-10 mm residual (a 15 mm slip → ~9.6 mm max residual) is still caught. Same spirit
   as the RMS gate; no warn-but-save, and empty residuals fail closed too.
-  **Threshold note (flag for the architect):** the offending fit's corner id 20 sits at
-  10.5 mm — a real ~1 cm mis-touch — so it is refused → re-touch it. But if genuine touch
-  precision on this rig is ~10 mm (gripper lean), a good-faith re-run could land just over
-  10 mm and be refused, reading as "the fix didn't work"; 12–15 mm may match the
-  achievable accuracy better. 10 mm kept per the spec for now — see QUESTIONS.
+  **Threshold — 10 mm, ratified (do not relax):** registration error propagates into
+  EVERY hover, and the end-to-end bar is ~15 mm at hover, so admitting 12–15 mm at
+  registration would spend the whole error budget before vision, IK, or gripper lean
+  add a millimetre. Single-digit touches are achievable on this rig — this very fit's
+  other two corners were 3.6 and 6.8 mm; corner id 20's 10.5 mm was one sloppier touch,
+  and the gate demanding a re-touch there is the system working, not failing. Only if
+  two genuinely careful re-runs both land just over 10 mm do we revisit, with that data,
+  via `ARMANI_MAX_RIGID_RESIDUAL_MM` — the knob exists for a documented decision, not a
+  silent shrug.
 - **Instrumentation:** the touch step prints a board-vs-robot pairwise **distance table**
   and names the corner that disagrees most, *before* the fit blends the error in.
 - The old stage-4 `charuco_correspondences` path (its own `mirror` flag) is untouched.
