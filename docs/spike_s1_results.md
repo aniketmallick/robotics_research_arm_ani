@@ -70,11 +70,16 @@ outside. **The saved calibration (0.1 px RMS) is fine and was NOT re-run.** Thre
 additive fixes:
 
 - **Workspace margin:** `calibrate.point_in_polygon` gained `margin_m` (default
-  0.0, behaviour unchanged); the hover/check paths pass `ARMANI_POLYGON_MARGIN_M`
-  (config, default **15 mm**). The polygon is the hull of a board lying ON the
-  table, so a 15 mm outward dilation stays far inside the real table — safety
-  rule 3 still holds, minus the pedantry. Fail-closed is unchanged: an empty/
-  degenerate polygon or a non-finite coordinate still refuses regardless of margin.
+  0.0, behaviour unchanged); the hover/check paths pass `ARMANI_POLYGON_MARGIN_M`.
+  **Default is 25 mm, not the 15 mm first guessed** — measured on the real 0.1 px
+  calibration, the saved polygon is the board-corner hull *shrunk inward by
+  `TABLE_MARGIN_M` (20 mm)*, so the corner targets sit **17.7–20.0 mm outside** it
+  and 15 mm still refused the outermost corners (`--live-corners` picks exactly
+  those). 25 mm undoes the 20 mm shrink + ~5 mm jitter headroom → **0/24 corners
+  refused**, landing only ~5 mm past the measured hull (still solidly on the real
+  table, which is far larger than the board), so safety rule 3 holds. Hard-capped
+  at 50 mm. Fail-closed is unchanged: an empty/degenerate/collinear polygon or a
+  non-finite coordinate (or non-finite margin) still refuses.
 - **Exit teardown:** the scripts now stop the pynput ESC listener and release cv2
   handles before exit (`safety.release_kill_switch`), guarding the known macOS
   teardown segfault. If it still fires after work completes, it corrupts nothing.

@@ -326,26 +326,30 @@ def _load_table_polygon() -> tuple[tuple[float, float], ...]:
 
 TABLE_POLYGON: tuple[tuple[float, float], ...] = _load_table_polygon()
 
-# Outward dilation of the table polygon applied at CHECK time (metres). The polygon
-# is the convex hull of a board lying ON the physical table, so its vertices ARE
-# board corners — a strict point-in-polygon rejects those very corners, and
-# re-detection jitter can nudge a target epsilon outside. 15 mm of dilation lets a
-# target sit on (or just past) a hull vertex while staying far inside the real
-# table, so safety rule 3 still holds. Distinct from TABLE_MARGIN_M, which SHRINKS
-# the hull when it is first built.
+# Outward dilation of the table polygon applied at CHECK time (metres). The saved
+# polygon is the convex hull of the board corners SHRUNK inward by TABLE_MARGIN_M
+# (built via polygon_from_points), so a board-corner target lands ~TABLE_MARGIN_M
+# OUTSIDE it — measured on the real 0.1 px calibration, the corners sit 10–20 mm
+# out (worst 20.0 mm). The default therefore has to UNDO that build-time shrink
+# plus a little jitter headroom, or --check --live-corners keeps refusing the very
+# corners it hovers over. 25 mm (TABLE_MARGIN_M + ~5 mm) admits all of them while
+# landing only ~5 mm past the measured hull — still solidly on the real table
+# (which is much larger than the board), so safety rule 3 holds.
+#   NOTE: 15 mm (the first guess) was measured INSUFFICIENT — it refused the
+#   outermost corners. If TABLE_MARGIN_M changes, revisit this default.
 #
 # Hard-capped: the workspace polygon is the SOLE XY guard for safety rule 3, so a
-# fat-fingered override (e.g. "15" meaning mm but read as 15 m) must not silently
+# fat-fingered override (e.g. "25" meaning mm but read as 25 m) must not silently
 # dilate the reach past the real table into the region where the homography
 # extrapolates wrongly. 5 cm is generous for any board-corner / jitter case.
 POLYGON_MARGIN_MAX_M = 0.05
 try:
-    _raw_polygon_margin = float(os.getenv("ARMANI_POLYGON_MARGIN_M") or 0.015)
+    _raw_polygon_margin = float(os.getenv("ARMANI_POLYGON_MARGIN_M") or 0.025)
 except ValueError:
     _raw_polygon_margin = float("nan")
 if not math.isfinite(_raw_polygon_margin) or _raw_polygon_margin < 0.0:
-    print(f"WARNING: ARMANI_POLYGON_MARGIN_M={_raw_polygon_margin!r} invalid; using default 0.015 m.")
-    POLYGON_MARGIN_M = 0.015
+    print(f"WARNING: ARMANI_POLYGON_MARGIN_M={_raw_polygon_margin!r} invalid; using default 0.025 m.")
+    POLYGON_MARGIN_M = 0.025
 elif _raw_polygon_margin > POLYGON_MARGIN_MAX_M:
     print(f"WARNING: ARMANI_POLYGON_MARGIN_M={_raw_polygon_margin} exceeds the {POLYGON_MARGIN_MAX_M} m "
           "cap; clamping. The check-time workspace dilation may not exceed this.")

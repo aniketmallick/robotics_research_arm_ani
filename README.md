@@ -184,11 +184,12 @@ frame size and reprojection error so this is auditable after the fact.
 point and **refuses to write** above `ARMANI_CALIB_MAX_REPROJ_PX` (default 15 px mean).
 An uncalibrated system has an empty table polygon, and the workspace check
 (safety rule 3) then refuses every reach — it fails closed, not open. The polygon
-is the hull of a board lying ON the table, so its vertices are board corners a
-strict test would reject; hover/check paths dilate the check outward by
-`ARMANI_POLYGON_MARGIN_M` (default 15 mm) so a corner-target passes while staying
-far inside the real table. Fail-closed (empty/degenerate polygon, non-finite
-coord) is unaffected by the margin.
+is the board-corner hull shrunk inward by `TABLE_MARGIN_M` (20 mm), so a corner
+target lands ~20 mm outside it (measured 17.7–20.0 mm); hover/check paths dilate
+the check outward by `ARMANI_POLYGON_MARGIN_M` (default 25 mm = the 20 mm shrink +
+~5 mm jitter) so corner targets pass while staying on the real table, hard-capped
+at 50 mm. Fail-closed (empty/degenerate polygon, non-finite coord/margin) is
+unaffected by the margin.
 
 **The confidence number is honest.** Gemini's pointing API returns no calibrated
 confidence, so `eyes.locate()` builds one from what can actually be observed: how many
