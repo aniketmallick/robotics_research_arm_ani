@@ -558,11 +558,34 @@ def calibration_corner_ids() -> tuple[int, int, int]:
     return origin, along_x, opposite
 
 
+def chessboard_corners_yup(board) -> np.ndarray:
+    """All board chessboard-corner coords (metres, Nx2) in a RIGHT-HANDED, y-UP frame.
+
+    OpenCV's ``getChessboardCorners()`` lays the board out image-style — y increases
+    DOWNWARD — which is LEFT-handed relative to the robot's y-up table frame. Fitting
+    that straight to the robot frame is a REFLECTION, which ``fit_rigid_2d``'s guard
+    (correctly) refuses, so the rigid residuals blow up (the operator saw 92/77/19 mm
+    at a 0.13 px board RMS) and hover misses by centimetres. Flipping y about the
+    corner-set centre — ``y' = (y_min + y_max) - y``, which equals ``board_height - y``
+    — makes board->robot a pure rotation again, so the reflection guard STAYS ON and
+    the fit is exact. Confirmed on the real saved payload: 92/77/19 mm -> 6.8/3.6/10.5.
+
+    Computed over the FULL corner set (never a detected subset), so the flip constant
+    is identical wherever a corner is looked up: the homography's board_mm and the
+    tip targets MUST share this frame or they desync.
+    """
+    corners = np.asarray(board.getChessboardCorners(), dtype=np.float64)[:, :2].copy()
+    ys = corners[:, 1]
+    corners[:, 1] = (float(ys.min()) + float(ys.max())) - ys
+    return corners
+
+
 def detect_charuco(frame, board) -> tuple[list[Point], list[Point], list[int]]:
     """Detect the board. Returns (pixel corners, board-mm corners in metres, ids).
 
-    Corners come back sub-pixel from ``detectBoard``. The board-frame coordinate
-    of each is taken from the board geometry, so it is exact by construction.
+    Corners come back sub-pixel from ``detectBoard``. The board-frame coordinate of
+    each is taken from the board geometry (normalized to a right-handed y-up frame by
+    ``chessboard_corners_yup``), so it is exact by construction.
     """
     import cv2
 
@@ -574,7 +597,7 @@ def detect_charuco(frame, board) -> tuple[list[Point], list[Point], list[int]]:
             f"found {found} ChArUco corners, need {config.CALIB_MIN_POINTS}. "
             "Check the whole board is in frame, flat, lit evenly and not glare-washed."
         )
-    board_points = board.getChessboardCorners()
+    board_points = chessboard_corners_yup(board)
     pixels: list[Point] = []
     board_mm: list[Point] = []
     found_ids: list[int] = []
@@ -611,14 +634,18 @@ def fit_board_homography(pixels: list[Point], board_m: list[Point]) -> tuple[np.
 
 
 def fit_rigid_2d(
-    src: list[Point], dst: list[Point]
+    src: list[Point], dst: list[Point], allow_reflection: bool = False
 ) -> tuple[np.ndarray, np.ndarray, list[float]]:
     """Least-squares rigid 2D transform src -> dst (rotation + translation, no scale).
 
-    Kabsch/Procrustes in 2D, with the reflection guard so a noisy 3-point fit
-    cannot flip into a mirror. Returns (R 2x2, t 2, per-point residuals in the
-    same units as the inputs — metres here). Both inputs MUST share units and
-    scale (a rigid transform preserves distance).
+    Kabsch/Procrustes in 2D. By default the reflection guard forces a proper
+    rotation (det +1) so a noisy 3-point fit cannot flip into a mirror — a mirror
+    would silently accept a wrong board->robot map. ``allow_reflection=True`` drops
+    the guard (permitting det -1); it exists ONLY for diagnosis (see
+    diagnose_saved_rigid): if the residuals collapse when reflection is permitted,
+    the inputs are opposite-handed and the real fix is to correct the FRAME, not to
+    accept the mirror. Returns (R 2x2, t 2, per-point residuals in the same units as
+    the inputs — metres here). Both inputs MUST share units and scale.
     """
     if len(src) != len(dst) or len(src) < 2:
         raise CalibrationError(f"need >=2 matched points, got {len(src)} and {len(dst)}")
@@ -628,12 +655,86 @@ def fit_rigid_2d(
     sc, dc = s - mu_s, d - mu_d
     covariance = sc.T @ dc
     u, _, vt = np.linalg.svd(covariance)
-    reflect = np.diag([1.0, float(np.sign(np.linalg.det(vt.T @ u.T)))])
-    rotation = vt.T @ reflect @ u.T
+    if allow_reflection:
+        rotation = vt.T @ u.T  # raw orthogonal Procrustes; may be a reflection (det -1)
+    else:
+        reflect = np.diag([1.0, float(np.sign(np.linalg.det(vt.T @ u.T)))])
+        rotation = vt.T @ reflect @ u.T
     translation = mu_d - rotation @ mu_s
     residuals = [float(np.hypot(*(point_d - (rotation @ point_s + translation))))
                  for point_s, point_d in zip(s, d)]
     return rotation, translation, residuals
+
+
+def distance_table(
+    board: list[Point], robot: list[Point], suspect_threshold_mm: float = 5.0
+) -> tuple[list[tuple[int, int, float, float, float]], int | None]:
+    """Pairwise distances (mm) between the touched corners: board vs robot.
+
+    A rigid touch preserves distance, so ``board_ij`` and ``robot_ij`` should match.
+    Each row is ``(i, j, board_mm, robot_mm, delta_mm)``. Returns the rows plus the
+    index of the corner that disagrees most — the one whose pairs carry the largest
+    total |delta| — when the worst single pair exceeds ``suspect_threshold_mm`` (else
+    None). Printed BEFORE the rigid fit, it names a mislabel/mistouch on the spot,
+    before the fit blends the error across all three points.
+
+    The ``suspect`` heuristic localizes a SINGLE mis-touched corner. It does NOT
+    reliably localize a two-corner PAIRING SWAP (which produces large deltas on two
+    pairs and can name the one correct common vertex) — but a swap is a gross error
+    that the residual and distance-consistency gates in save_charuco refuse outright,
+    so nothing wrong is saved either way; only the "re-touch this one" hint is unsure.
+    """
+    n = len(board)
+    if n != len(robot):
+        raise CalibrationError(f"board/robot point count mismatch: {n} vs {len(robot)}")
+    rows: list[tuple[int, int, float, float, float]] = []
+    disagreement = [0.0] * n
+    worst = 0.0
+    for i in range(n):
+        for j in range(i + 1, n):
+            db = float(np.hypot(board[i][0] - board[j][0], board[i][1] - board[j][1])) * 1000.0
+            dr = float(np.hypot(robot[i][0] - robot[j][0], robot[i][1] - robot[j][1])) * 1000.0
+            delta = dr - db
+            rows.append((i, j, db, dr, delta))
+            disagreement[i] += abs(delta)
+            disagreement[j] += abs(delta)
+            worst = max(worst, abs(delta))
+    suspect = int(np.argmax(disagreement)) if (n > 0 and worst > suspect_threshold_mm) else None
+    return rows, suspect
+
+
+def diagnose_saved_rigid(path: Path | None = None) -> dict:
+    """Refit the SAVED tip pairs both ways to classify a bad rigid fit (headless).
+
+    Reads ``charuco.tip_board_m`` / ``tip_robot_m`` from the saved calibration and
+    fits the rigid transform with the reflection guard ON (as saved) and OFF. If the
+    residuals collapse when reflection is permitted, the touch points are opposite-
+    handed to the board — a FRAME error (fixed by chessboard_corners_yup), not a
+    per-corner mis-touch. Reports residuals both ways and the signed triangle areas.
+    """
+    if path is None:
+        path = config.HOMOGRAPHY_PATH
+    ch = json.loads(path.read_text()).get("charuco", {})
+    if "tip_board_m" not in ch or "tip_robot_m" not in ch:
+        raise CalibrationError(f"{path} has no saved tip pairs to diagnose (not a charuco_rigid map?)")
+    board = [(float(x), float(y)) for x, y in ch["tip_board_m"]]
+    robot = [(float(x), float(y)) for x, y in ch["tip_robot_m"]]
+    _, _, forbidden = fit_rigid_2d(board, robot, allow_reflection=False)
+    _, _, permitted = fit_rigid_2d(board, robot, allow_reflection=True)
+
+    def _signed_area2(pts: list[Point]) -> float:
+        if len(pts) < 3:
+            return 0.0
+        a, b, c = pts[0], pts[1], pts[2]
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+    return {
+        "residual_forbidden_mm": [round(r * 1000, 1) for r in forbidden],
+        "residual_permitted_mm": [round(r * 1000, 1) for r in permitted],
+        "board_handedness": "CCW" if _signed_area2(board) > 0 else "CW",
+        "robot_handedness": "CCW" if _signed_area2(robot) > 0 else "CW",
+        "reflection_class_error": bool(max(permitted) < 0.5 * max(forbidden)) if forbidden else False,
+    }
 
 
 def rigid_affine_3x3(rotation: np.ndarray, translation: np.ndarray) -> np.ndarray:
@@ -679,6 +780,34 @@ def save_charuco(
         raise CalibrationError(
             f"board homography RMS is {board_rms_px:.1f} px, over the "
             f"{config.CALIB_MAX_REPROJECTION_PX:.0f} px ceiling. NOT SAVED."
+        )
+    # Rigid-fit gates (fail closed, same spirit as the RMS gate): a bad board->robot
+    # fit — a mis-touched corner, a moved board, or opposite handedness — warps every
+    # hover, so refuse rather than warn-but-save.
+    #
+    # Empty residuals = no accuracy evidence at all; fail closed rather than treat
+    # "no data" as a perfect fit.
+    if not rigid_residuals_m:
+        raise CalibrationError("no rigid residuals to check — refusing to save a fit with no evidence.")
+    max_residual_mm = max(r * 1000.0 for r in rigid_residuals_m)
+    if max_residual_mm > config.MAX_RIGID_RESIDUAL_MM:
+        raise CalibrationError(
+            f"max rigid residual is {max_residual_mm:.1f} mm, over the "
+            f"{config.MAX_RIGID_RESIDUAL_MM:.0f} mm gate. NOT SAVED — a mis-touched corner, a "
+            "board that moved, or a frame/handedness error. Re-touch the 3 marked corners "
+            "(check the distance table printed before the fit) and re-run."
+        )
+    # Distance-consistency gate: a rigid touch PRESERVES pairwise distances. A single
+    # mis-touch that Procrustes spreads across all three points (a 15 mm slip averages
+    # to ~9.6 mm max residual, UNDER the residual gate) still shows up here as a large
+    # pairwise mismatch — so a distance_table-flagged corner cannot slip past the save.
+    rows, _ = distance_table(tip_board_m, tip_robot_m)
+    max_dist_delta_mm = max((abs(delta) for *_, delta in rows), default=0.0)
+    if max_dist_delta_mm > config.MAX_RIGID_RESIDUAL_MM:
+        raise CalibrationError(
+            f"a board-vs-robot pairwise distance disagrees by {max_dist_delta_mm:.1f} mm, over the "
+            f"{config.MAX_RIGID_RESIDUAL_MM:.0f} mm gate — a mis-touch the averaged residual hid. "
+            "NOT SAVED. Check the distance table and re-touch the flagged corner."
         )
 
     robot_corners = [pixel_to_robot(matrix, px) for px in corner_pixels]

@@ -56,10 +56,14 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="validate the saved calibration")
     parser.add_argument("--live-corners", action="store_true",
                         help="with --check: hover over 2 board corners for a ruler measurement")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="refit the SAVED tip pairs both ways to classify a bad rigid fit (headless)")
     args = parser.parse_args()
 
     banner()
     try:
+        if args.diagnose:
+            return run_diagnose()
         if args.check:
             return run_check(args.live_corners)
         if args.run:
@@ -148,7 +152,10 @@ def run_calibration() -> int:
         return 1
 
     corner_ids = calibrate.calibration_corner_ids()
-    board_points = board.getChessboardCorners()
+    # Right-handed (y-up) board frame, so board->robot is a pure rotation and the
+    # reflection guard in fit_rigid_2d does not blow up (S1 fix 2). Same source as the
+    # homography's board_mm, so the two frames stay consistent.
+    board_points = calibrate.chessboard_corners_yup(board)
     tip_board = [(float(board_points[c][0]), float(board_points[c][1])) for c in corner_ids]
     try:
         tip_robot = _touch_corners(arm, corner_ids, tip_board)
@@ -163,12 +170,25 @@ def run_calibration() -> int:
     if tip_robot is None:
         return 1
 
-    print("\nStep 3/3 — fit and save.")
+    print("\nStep 3/3 — check the touches, then fit and save.")
+    # A rigid touch preserves pairwise distances, so a board-vs-robot mismatch here
+    # names a mislabel/mistouch BEFORE the fit blends it across all three points.
+    disagree_mm = 5.0  # one threshold for both the per-row flag and the named suspect
+    rows, suspect = calibrate.distance_table(tip_board, tip_robot, suspect_threshold_mm=disagree_mm)
+    print("  pairwise distances (board vs robot):")
+    for i, j, db, dr, delta in rows:
+        flag = "   <-- disagrees" if abs(delta) > disagree_mm else ""
+        print(f"    corners {corner_ids[i]}-{corner_ids[j]}: board {db:6.1f}  robot {dr:6.1f}  "
+              f"Δ {delta:+6.1f} mm{flag}")
+    if suspect is not None:
+        print(f"  ⚠ corner id {corner_ids[suspect]} disagrees most — re-touch it if the fit is refused.")
+
     rotation, translation, residuals = calibrate.fit_rigid_2d(tip_board, tip_robot)
     residual_mm = [r * 1000 for r in residuals]
     print(f"  rigid residuals (mm): {', '.join(f'{r:.2f}' for r in residual_mm)}")
-    if max(residual_mm) > 5.0:
-        print("  WARNING: a residual over 5 mm suggests a mis-touched corner or a board that moved.")
+    if max(residual_mm) > config.MAX_RIGID_RESIDUAL_MM:
+        print(f"  max residual exceeds the {config.MAX_RIGID_RESIDUAL_MM:.0f} mm gate — the save WILL "
+              "refuse; re-touch the flagged corner.")
 
     matrix = calibrate.compose_pixel_to_robot(homography, rotation, translation)
     try:
@@ -288,6 +308,28 @@ def _live_corner_check(homography, board, pixels, ids) -> int:
         except Exception as exc:
             print(f"  (warning: disconnect failed: {exc})", file=sys.stderr)
     print("\nLog the ruler offsets in docs/spike_s1_results.md — that is the honest error.")
+    return 0
+
+
+def run_diagnose() -> int:
+    """Part 1: classify a saved bad rigid fit without touching hardware."""
+    try:
+        result = calibrate.diagnose_saved_rigid()
+    except (OSError, ValueError, KeyError, calibrate.CalibrationError) as exc:
+        print(f"cannot diagnose (no saved charuco_rigid map?): {exc}", file=sys.stderr)
+        return 1
+    opposite = result["board_handedness"] != result["robot_handedness"]
+    print("\n=== rigid-fit diagnosis (saved payload, headless) ===")
+    print(f"  handedness : board {result['board_handedness']}, robot {result['robot_handedness']}"
+          + ("  -> OPPOSITE (reflection)" if opposite else "  -> same"))
+    print(f"  residuals reflection FORBIDDEN (as saved): {result['residual_forbidden_mm']} mm")
+    print(f"  residuals reflection PERMITTED           : {result['residual_permitted_mm']} mm")
+    if result["reflection_class_error"]:
+        print("  VERDICT: reflection-class (board-frame handedness) error — fixed by the y-up board")
+        print("           frame. Re-run --run; residuals should then reflect real touch error only.")
+    else:
+        print("  VERDICT: not a clean reflection collapse — suspect a per-corner mis-touch; the")
+        print("           distance table printed during --run names the corner that disagrees.")
     return 0
 
 

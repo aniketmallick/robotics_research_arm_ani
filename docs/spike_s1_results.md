@@ -99,6 +99,41 @@ additive fixes:
 > check margin. Apply this ONLY at the next recalibration, never retroactively (the
 > current saved 0.1 px map stays as-is).
 
+## Board-frame handedness + residual save gate (2026-07-23)
+
+A `--run` calibration gave board RMS **0.13 px** but rigid residuals **92.3 / 76.7 /
+18.6 mm**, and it **SAVED** — downstream hover missed by 3–4 cm.
+
+**Diagnosis** (`calibrate_charuco.py --diagnose`, headless, on the saved payload):
+the touch triangle is **opposite-handed** to the board (board CCW, robot CW).
+Refitting with the reflection guard OFF collapses the residuals **92/77/19 → 6.8/3.6/
+10.5 mm**, so it is a reflection-class error, not per-corner noise. Root cause:
+OpenCV's `getChessboardCorners()` is image-style **y-DOWN** (left-handed), the robot
+table frame is **y-UP** — so board→robot is a *reflection*, which `fit_rigid_2d`'s
+guard (correctly) refuses, producing garbage residuals.
+
+**Fixes (additive):**
+- **Frame, not guard:** `calibrate.chessboard_corners_yup` flips y about the corner-
+  set centre (`y' = y_min + y_max − y`, over the *full* corner set) so board→robot is
+  a **pure rotation** again and the reflection guard **stays on**. Applied at the one
+  source used by *both* the homography `board_mm` and the tip targets, so the frames
+  stay consistent. Verified: 92/77/19 → 6.8/3.6/10.5 mm with the guard ON.
+- **Fail-closed gates:** `save_charuco` now REFUSES (a) when the max rigid residual
+  exceeds `ARMANI_MAX_RIGID_RESIDUAL_MM` (default **10 mm**), and (b) when any board-vs-
+  robot pairwise **distance** disagrees by more than that. (b) matters because a rigid
+  touch preserves distance, so a single mis-touch that Procrustes *averages* into a
+  sub-10 mm residual (a 15 mm slip → ~9.6 mm max residual) is still caught. Same spirit
+  as the RMS gate; no warn-but-save, and empty residuals fail closed too.
+  **Threshold note (flag for the architect):** the offending fit's corner id 20 sits at
+  10.5 mm — a real ~1 cm mis-touch — so it is refused → re-touch it. But if genuine touch
+  precision on this rig is ~10 mm (gripper lean), a good-faith re-run could land just over
+  10 mm and be refused, reading as "the fix didn't work"; 12–15 mm may match the
+  achievable accuracy better. 10 mm kept per the spec for now — see QUESTIONS.
+- **Instrumentation:** the touch step prints a board-vs-robot pairwise **distance table**
+  and names the corner that disagrees most, *before* the fit blends the error in.
+- The old stage-4 `charuco_correspondences` path (its own `mirror` flag) is untouched.
+  **The saved bad map was NOT re-run;** the operator re-runs `--run` to recalibrate.
+
 ## Parallax
 
 The camera views the table at an angle, so a point on an object's *visual

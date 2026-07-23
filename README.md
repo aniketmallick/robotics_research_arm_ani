@@ -182,6 +182,10 @@ frame size and reprojection error so this is auditable after the fact.
 
 **A bad map is worse than no map.** `calibrate.save()` reprojects every calibration
 point and **refuses to write** above `ARMANI_CALIB_MAX_REPROJ_PX` (default 15 px mean).
+The ChArUco rigid path adds a second fail-closed gate: `save_charuco` refuses when the
+max 3-touch rigid residual exceeds `ARMANI_MAX_RIGID_RESIDUAL_MM` (default 10 mm), and
+`calibrate_charuco.py --diagnose` refits a saved bad fit both ways to tell a
+frame-handedness error from a per-corner mis-touch.
 An uncalibrated system has an empty table polygon, and the workspace check
 (safety rule 3) then refuses every reach — it fails closed, not open. The polygon
 is the board-corner hull shrunk inward by `TABLE_MARGIN_M` (20 mm), so a corner

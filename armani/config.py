@@ -439,6 +439,13 @@ TABLE_MARGIN_M = float(os.getenv("ARMANI_TABLE_MARGIN_M") or 0.02)
 # the inverse homography and comparing against the pixels they came from.
 CALIB_MAX_REPROJECTION_PX = float(os.getenv("ARMANI_CALIB_MAX_REPROJ_PX") or 15.0)
 
+# The ChArUco rigid path (board->robot) is fit from 3 tip touches; its max per-point
+# residual is the honest accuracy of that fit. A bad rigid fit — a mis-touched
+# corner, a moved board, or opposite handedness — warps every hover, so save_charuco
+# REFUSES above this ceiling (same spirit as the pixel RMS gate). Warn-but-save on an
+# accuracy-critical fit is forbidden. Millimetres; the good touches sit well under it.
+MAX_RIGID_RESIDUAL_MM = float(os.getenv("ARMANI_MAX_RIGID_RESIDUAL_MM") or 10.0)
+
 # --- Object catalog ------------------------------------------------------
 # The five demo objects. On the taught-zone path the NAMES are the load-bearing
 # part: they are the strings Gemini is asked to find, and identity is the only
