@@ -60,6 +60,28 @@ Real hardware (NEEDS THE OPERATOR — fill in):
    `python scripts/hover_object.py --object "<name>" --live` (operator present,
    hand on ESC). Tip visually centred within ~1.5 cm on ≥4/5 = success.
 
+## Boundary-margin + teardown fix (2026-07-23)
+
+The first `--check --live-corners` run refused **both** corners. Root cause: the
+corner targets are hull **vertices** of the saved polygon (the polygon is the
+convex hull of the board corners themselves), and a strict point-in-polygon
+rejects its own boundary; re-detection jitter can also nudge a corner epsilon
+outside. **The saved calibration (0.1 px RMS) is fine and was NOT re-run.** Three
+additive fixes:
+
+- **Workspace margin:** `calibrate.point_in_polygon` gained `margin_m` (default
+  0.0, behaviour unchanged); the hover/check paths pass `ARMANI_POLYGON_MARGIN_M`
+  (config, default **15 mm**). The polygon is the hull of a board lying ON the
+  table, so a 15 mm outward dilation stays far inside the real table — safety
+  rule 3 still holds, minus the pedantry. Fail-closed is unchanged: an empty/
+  degenerate polygon or a non-finite coordinate still refuses regardless of margin.
+- **Exit teardown:** the scripts now stop the pynput ESC listener and release cv2
+  handles before exit (`safety.release_kill_switch`), guarding the known macOS
+  teardown segfault. If it still fires after work completes, it corrupts nothing.
+- **Kill-switch honesty:** each `--live` path now prints a LOUD warning if the ESC
+  listener is not trusted (Input Monitoring not granted) — ESC is dead, only Ctrl-C
+  freezes. Same `IS_TRUSTED` check the preflight uses. Warn, don't block.
+
 ## Parallax
 
 The camera views the table at an angle, so a point on an object's *visual

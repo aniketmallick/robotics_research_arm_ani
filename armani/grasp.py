@@ -74,7 +74,7 @@ def plan_hover(x: float, y: float, start_pose: dict[str, float]) -> HoverResult:
     Split out from ``hover_over`` so the whole decision path is testable without
     a robot, and so a caller can ask "could you?" without asking "please do".
     """
-    if not calibrate.point_in_polygon(x, y):
+    if not calibrate.point_in_polygon(x, y, margin_m=config.POLYGON_MARGIN_M):
         if not config.TABLE_POLYGON:
             reason = (
                 "no calibrated table polygon — the camera has not been mapped to the table. "

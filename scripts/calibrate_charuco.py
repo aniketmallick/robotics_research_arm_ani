@@ -59,11 +59,23 @@ def main() -> int:
     args = parser.parse_args()
 
     banner()
-    if args.check:
-        return run_check(args.live_corners)
-    if args.run:
-        return run_calibration()
-    return run_dry()
+    try:
+        if args.check:
+            return run_check(args.live_corners)
+        if args.run:
+            return run_calibration()
+        return run_dry()
+    finally:
+        # Explicit teardown before interpreter exit: a live pynput listener (and
+        # AVFoundation/cv2 handles) torn down implicitly during macOS shutdown can
+        # segfault. release_kill_switch is a no-op when no listener was installed.
+        safety.release_kill_switch()
+        try:
+            import cv2
+
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
 
 
 # --- dry run: camera + RMS only, no arm, no save -------------------------
@@ -126,6 +138,7 @@ def run_calibration() -> int:
         return 1
     safety.clear_stop()
     safety.install_kill_switch()
+    safety.warn_kill_switch_untrusted()
 
     print("\nStep 2/3 — touch the 3 marked corners. Connecting to the arm...")
     try:
@@ -249,6 +262,7 @@ def _live_corner_check(homography, board, pixels, ids) -> int:
         return 1
     safety.clear_stop()
     safety.install_kill_switch()
+    safety.warn_kill_switch_untrusted()
     try:
         arm = motion.connect()
     except Exception as exc:

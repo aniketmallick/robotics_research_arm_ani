@@ -156,7 +156,7 @@ def main() -> int:
     print(f"  pixel      : {detection.point}")
     print(f"  robot XY   : ({x:+.4f}, {y:+.4f}) m")
     print(f"  confidence : {detection.confidence:.2f}")
-    if not calibrate.point_in_polygon(x, y):
+    if not calibrate.point_in_polygon(x, y, margin_m=config.POLYGON_MARGIN_M):
         return skip(
             f"({x:+.3f}, {y:+.3f}) m is outside the calibrated table polygon. "
             "Move the object further onto the calibrated area."

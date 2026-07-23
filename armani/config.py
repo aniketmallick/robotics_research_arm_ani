@@ -17,6 +17,7 @@ Action dicts use lerobot's feature keys: ``"<joint>.pos"`` e.g. ``"shoulder_pan.
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 
@@ -324,6 +325,33 @@ def _load_table_polygon() -> tuple[tuple[float, float], ...]:
 
 
 TABLE_POLYGON: tuple[tuple[float, float], ...] = _load_table_polygon()
+
+# Outward dilation of the table polygon applied at CHECK time (metres). The polygon
+# is the convex hull of a board lying ON the physical table, so its vertices ARE
+# board corners — a strict point-in-polygon rejects those very corners, and
+# re-detection jitter can nudge a target epsilon outside. 15 mm of dilation lets a
+# target sit on (or just past) a hull vertex while staying far inside the real
+# table, so safety rule 3 still holds. Distinct from TABLE_MARGIN_M, which SHRINKS
+# the hull when it is first built.
+#
+# Hard-capped: the workspace polygon is the SOLE XY guard for safety rule 3, so a
+# fat-fingered override (e.g. "15" meaning mm but read as 15 m) must not silently
+# dilate the reach past the real table into the region where the homography
+# extrapolates wrongly. 5 cm is generous for any board-corner / jitter case.
+POLYGON_MARGIN_MAX_M = 0.05
+try:
+    _raw_polygon_margin = float(os.getenv("ARMANI_POLYGON_MARGIN_M") or 0.015)
+except ValueError:
+    _raw_polygon_margin = float("nan")
+if not math.isfinite(_raw_polygon_margin) or _raw_polygon_margin < 0.0:
+    print(f"WARNING: ARMANI_POLYGON_MARGIN_M={_raw_polygon_margin!r} invalid; using default 0.015 m.")
+    POLYGON_MARGIN_M = 0.015
+elif _raw_polygon_margin > POLYGON_MARGIN_MAX_M:
+    print(f"WARNING: ARMANI_POLYGON_MARGIN_M={_raw_polygon_margin} exceeds the {POLYGON_MARGIN_MAX_M} m "
+          "cap; clamping. The check-time workspace dilation may not exceed this.")
+    POLYGON_MARGIN_M = POLYGON_MARGIN_MAX_M
+else:
+    POLYGON_MARGIN_M = _raw_polygon_margin
 
 # --- Kinematics (stage 4) -------------------------------------------------
 # Kinematics-only copy of so101_new_calib.urdf from TheRobotStudio/SO-ARM100

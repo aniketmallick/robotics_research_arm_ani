@@ -38,7 +38,7 @@ if str(TESTS_DIR) not in sys.path:
 
 import _bootstrap  # noqa: E402,F401  (verifies the interpreter, exits if wrong)
 
-from armani import config, gestures, motion, zones  # noqa: E402
+from armani import config, gestures, motion, safety, zones  # noqa: E402
 from armani.logutil import log_event  # noqa: E402
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
@@ -183,15 +183,17 @@ def check_input_monitoring() -> Result:
     ``listener.running`` is NOT the signal. On macOS an untrusted process starts
     a listener perfectly happily and then simply never receives an event, so
     checking only that it started reports the kill switch as fine while it is
-    silently dead. pynput exposes the real answer as ``Listener.IS_TRUSTED``,
-    taken from AXIsProcessTrusted().
+    silently dead. The real answer is ``AXIsProcessTrusted()`` — queried via
+    ``safety.esc_listener_trusted()`` so preflight and the --live kill-switch
+    warning share ONE correct check. (Reading ``Listener.IS_TRUSTED`` off the
+    class is a permanently-False default and must not be used.)
     """
     try:
         from pynput import keyboard
     except Exception as exc:
         return Result(FAIL, f"pynput unavailable: {exc}")
 
-    trusted = getattr(keyboard.Listener, "IS_TRUSTED", None)
+    trusted = safety.esc_listener_trusted()
     try:
         listener = keyboard.Listener(on_press=lambda key: None)
         listener.daemon = True

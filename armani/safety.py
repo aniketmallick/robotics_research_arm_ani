@@ -35,6 +35,11 @@ _stop_requested = threading.Event()
 # kill switch behaves exactly as before.
 _freeze_suppressed = threading.Event()
 
+# Handle to the global ESC listener thread (set by _install_esc_listener). Stored
+# so a script can stop it before interpreter exit — a live pynput listener torn
+# down implicitly during macOS shutdown can segfault. None when none is installed.
+_esc_listener: object | None = None
+
 
 
 class OutsideEnvelopeError(RuntimeError):
@@ -374,12 +379,73 @@ def _install_esc_listener() -> None:
         listener = keyboard.Listener(on_press=_on_press)
         listener.daemon = True
         listener.start()
+        global _esc_listener
+        _esc_listener = listener
     except Exception as exc:
         log.warning(
             "ESC kill switch unavailable (%s). Grant Input Monitoring to your terminal: "
             "System Settings > Privacy & Security > Input Monitoring. Ctrl-C still works.",
             exc,
         )
+
+
+def esc_listener_trusted() -> bool | None:
+    """Whether this process is TRUSTED for global key events (macOS Input Monitoring).
+
+    macOS gates global keyboard events behind Accessibility/Input-Monitoring trust.
+    NOTE: ``keyboard.Listener.IS_TRUSTED`` is a permanently-False CLASS default —
+    pynput writes the real value onto the listener INSTANCE only after its thread
+    runs, so reading the class attribute cries wolf on every run. Query the
+    authoritative source directly and synchronously instead:
+    ``AXIsProcessTrusted()`` (the same call pynput's darwin backend makes). Returns
+    True/False when known, or None when the check is unavailable (not macOS, or
+    pynput internals changed) so callers stay silent rather than warn falsely.
+    """
+    try:
+        from pynput._util.darwin import HIServices  # macOS-only pynput backend
+    except Exception:
+        return None
+    try:
+        return bool(HIServices.AXIsProcessTrusted())
+    except Exception:
+        return None
+
+
+def warn_kill_switch_untrusted() -> bool:
+    """LOUD warning when the ESC kill switch is dead (untrusted Input Monitoring).
+
+    Called by a --live path right after install_kill_switch. Warn, do NOT block:
+    Ctrl-C still freezes the arm, so a missing ESC is a degraded-but-usable state,
+    not a stop-everything condition. Returns True iff it warned.
+    """
+    if esc_listener_trusted() is False:
+        print(
+            "\n  \033[1;31m*** ESC KILL SWITCH IS DEAD ***\033[0m\n"
+            "  \033[1;31mThis terminal is NOT trusted for Input Monitoring, so the global ESC\n"
+            "  listener will never receive a key. Only Ctrl-C will freeze the arm.\033[0m\n"
+            "  Fix: grant Accessibility + Input Monitoring to THIS terminal and restart it.\n"
+        )
+        return True
+    return False
+
+
+def release_kill_switch() -> None:
+    """Stop the global ESC listener thread, if one is running.
+
+    Call from a script's teardown before interpreter exit: a live pynput listener
+    torn down implicitly during macOS shutdown can segfault. Best-effort and
+    idempotent — safe to call when no listener was installed. Leaves the SIGINT
+    (Ctrl-C) handler in place; only the pynput thread is stopped.
+    """
+    global _esc_listener
+    listener = _esc_listener
+    _esc_listener = None
+    if listener is None:
+        return
+    try:
+        listener.stop()  # type: ignore[attr-defined]
+    except Exception as exc:
+        log.debug("could not stop the ESC listener during teardown: %s", exc)
 
 
 # --- Operator presence ---------------------------------------------------

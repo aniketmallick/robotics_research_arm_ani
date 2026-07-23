@@ -90,7 +90,8 @@ def main() -> int:
         print(f"could not map pixel to the table: {exc}", file=sys.stderr)
         return 1
     print(f"robot XY: ({x:+.4f}, {y:+.4f}) m   hover z: {config.hover_z():.3f} m")
-    print(f"on table: {'yes' if calibrate.point_in_polygon(x, y) else 'NO — outside the polygon'}")
+    on_table = calibrate.point_in_polygon(x, y, margin_m=config.POLYGON_MARGIN_M)
+    print(f"on table: {'yes' if on_table else 'NO — outside the polygon'}")
 
     # --- plan (IK) ---
     plan = grasp.plan_hover(x, y, config.HOME_POSE)
@@ -118,11 +119,13 @@ def _run_live(object_name: str, x: float, y: float, plan) -> int:
         return 1
     safety.clear_stop()
     safety.install_kill_switch()
+    safety.warn_kill_switch_untrusted()
     print("kill switch armed: ESC / Ctrl-C freezes the arm.")
     try:
         arm = motion.connect()
     except Exception as exc:
         print(f"could not connect: {type(exc).__name__}: {exc}", file=sys.stderr)
+        safety.release_kill_switch()  # connect failed before the finally below could run
         return 1
 
     try:
@@ -146,6 +149,15 @@ def _run_live(object_name: str, x: float, y: float, plan) -> int:
             arm.disconnect()
         except Exception as exc:
             print(f"  (warning: disconnect failed: {exc})", file=sys.stderr)
+        # Stop the ESC listener + release cv2 handles before exit (macOS teardown
+        # segfault guard). No-op if the listener was never installed.
+        safety.release_kill_switch()
+        try:
+            import cv2
+
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

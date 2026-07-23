@@ -184,13 +184,55 @@ def polygon_from_points(robots: list[Point], margin: float | None = None) -> tup
     return tuple(shrunk)
 
 
-def point_in_polygon(x: float, y: float, polygon: tuple[Point, ...] | None = None) -> bool:
+def _point_segment_distance(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+    """Shortest distance from point (px, py) to the segment (ax,ay)-(bx,by)."""
+    dx, dy = bx - ax, by - ay
+    seg_sq = dx * dx + dy * dy
+    if seg_sq == 0.0:  # degenerate segment: the two endpoints coincide
+        return float(np.hypot(px - ax, py - ay))
+    t = ((px - ax) * dx + (py - ay) * dy) / seg_sq
+    t = min(1.0, max(0.0, t))  # clamp onto the segment
+    return float(np.hypot(px - (ax + t * dx), py - (ay + t * dy)))
+
+
+def _distance_to_polygon(x: float, y: float, polygon: tuple[Point, ...]) -> float:
+    """Shortest distance from (x, y) to the polygon's boundary (any edge)."""
+    count = len(polygon)
+    return min(
+        _point_segment_distance(
+            x, y, polygon[i][0], polygon[i][1], polygon[(i + 1) % count][0], polygon[(i + 1) % count][1]
+        )
+        for i in range(count)
+    )
+
+
+def _polygon_area(polygon: tuple[Point, ...]) -> float:
+    """Absolute area of the polygon (shoelace). Zero for a collinear/degenerate hull."""
+    count = len(polygon)
+    twice = sum(
+        polygon[i][0] * polygon[(i + 1) % count][1] - polygon[(i + 1) % count][0] * polygon[i][1]
+        for i in range(count)
+    )
+    return abs(twice) / 2.0
+
+
+def point_in_polygon(
+    x: float, y: float, polygon: tuple[Point, ...] | None = None, margin_m: float = 0.0
+) -> bool:
     """Safety rule 3: is this robot (x, y) inside the calibrated table?
 
     Ray casting, written out rather than delegated to cv2, because this is on
     the path that decides whether the arm moves: it must be unit-testable
     without a camera stack and must fail closed. An empty polygon — which is
     what an uncalibrated system has — always returns False.
+
+    ``margin_m`` dilates the allowed region OUTWARD by that many metres: a point
+    outside the strict polygon but within ``margin_m`` of its boundary is accepted.
+    This lets a target sitting on a hull vertex (or nudged epsilon-outside by
+    detection jitter) pass. ``margin_m <= 0`` (the default) keeps the strict
+    behaviour, so every existing caller is unchanged. The dilation never relaxes
+    the fail-closed guards below: an empty/degenerate polygon or a non-finite
+    coordinate still returns False regardless of the margin.
     """
     if polygon is None:
         polygon = config.TABLE_POLYGON
@@ -209,7 +251,17 @@ def point_in_polygon(x: float, y: float, polygon: tuple[Point, ...] | None = Non
             crossing_x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
             if x < crossing_x:
                 inside = not inside
-    return inside
+    if inside:
+        return True
+    if margin_m > 0.0 and np.isfinite(margin_m):
+        # Fail closed on a zero-area (collinear) polygon: it encloses nothing, so the
+        # distance test must not admit points near its degenerate line. (Cannot arise
+        # from polygon_from_points, which raises on collinear input — defence in depth
+        # for arbitrary callers, keeping the fail-closed promise in the docstring.)
+        if _polygon_area(polygon) < 1e-9:
+            return False
+        return _distance_to_polygon(x, y, polygon) <= margin_m
+    return False
 
 
 # --- Persistence ---------------------------------------------------------

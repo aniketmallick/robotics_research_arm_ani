@@ -152,7 +152,7 @@ def _report_mapping(detection: eyes.Detection) -> None:
         print(f"  could not map the point: {exc}")
         return
 
-    inside = calibrate.point_in_polygon(x, y)
+    inside = calibrate.point_in_polygon(x, y, margin_m=config.POLYGON_MARGIN_M)
     print(f"  robot XY : ({x:+.3f}, {y:+.3f}) m")
     print(f"  on table : {'yes' if inside else 'NO — outside the calibrated polygon'}")
 

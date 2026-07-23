@@ -183,7 +183,12 @@ frame size and reprojection error so this is auditable after the fact.
 **A bad map is worse than no map.** `calibrate.save()` reprojects every calibration
 point and **refuses to write** above `ARMANI_CALIB_MAX_REPROJ_PX` (default 15 px mean).
 An uncalibrated system has an empty table polygon, and the workspace check
-(safety rule 3) then refuses every reach — it fails closed, not open.
+(safety rule 3) then refuses every reach — it fails closed, not open. The polygon
+is the hull of a board lying ON the table, so its vertices are board corners a
+strict test would reject; hover/check paths dilate the check outward by
+`ARMANI_POLYGON_MARGIN_M` (default 15 mm) so a corner-target passes while staying
+far inside the real table. Fail-closed (empty/degenerate polygon, non-finite
+coord) is unaffected by the margin.
 
 **The confidence number is honest.** Gemini's pointing API returns no calibrated
 confidence, so `eyes.locate()` builds one from what can actually be observed: how many
