@@ -62,6 +62,19 @@ Headless check first: fine-tuned targets in OUR degree convention, clamp-bit rat
   which diagnosis applies here.
 - **Evidence:** `experiments/s2_zero_shot/{trials.csv, logs/episode_s3*.jsonl}`.
 
+### Ratified exception — eval clamp profile
+
+> **RATIFIED (architect), S3 fine-tuned-eval ONLY:** if `check_dataset` flags any body
+> joint beyond policy ±60°, the operator is authorized to eval the fine-tuned checkpoint
+> with `--clamp-profile recorded`. Mandatory: operator present, kill switch armed, hand
+> on power. NEVER the demo pipeline, NEVER the base/S2 baseline, NEVER unattended.
+> Rationale: clamping a policy tighter than its training data guarantees a false-negative
+> grasp; recorded is an already-ratified safe bound. Authorization expires when S3 closes.
+
+Enforced structurally: `--clamp-profile recorded` is refused on the base model (S2
+baseline stays untouchable). Which profile the eval actually used is in each episode's
+`clamp_source` (e.g. `armani.safety.clamp_action(recorded)`).
+
 ## Verdict (fill after eval)
 
 **TODO.** The pivotal question — did learned manipulation clear the bar? Skeleton to

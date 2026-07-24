@@ -46,12 +46,22 @@ eval:
   ranges to the architect.** The recorded profile is already a ratified safe bound and a
   fine-tuned policy is far closer to "replaying teleop" (recorded) than to "untrusted
   LLM JSON" (policy). The architect ratifies the `recorded` profile for the **fine-tuned
-  eval ONLY** — operator-present + kill-switch mandatory, documented as an explicit
-  exception. **That profile switch is NOT wired yet** (default is `policy`); it will be
-  added in a reviewed change once the ranges confirm it's needed. A riser under the
-  block stays as the fallback if the recorded envelope feels too loose live.
+  eval ONLY**, wired as `--clamp-profile recorded` (see the ratification below). A riser
+  under the block stays as the fallback if the recorded envelope feels too loose live.
 
 Do **not** misread a geometry-driven high clamp-bit rate as "wrong checkpoint or stats."
+
+> **RATIFIED (architect), S3 fine-tuned-eval ONLY:** if `check_dataset` flags any body
+> joint beyond policy ±60°, the operator is authorized to eval the fine-tuned checkpoint
+> with `--clamp-profile recorded`. Mandatory: operator present, kill switch armed, hand
+> on power. NEVER the demo pipeline, NEVER the base/S2 baseline, NEVER unattended.
+> Rationale: clamping a policy tighter than its training data guarantees a false-negative
+> grasp; recorded is an already-ratified safe bound. Authorization expires when S3 closes.
+
+The runner enforces the scope structurally: `--clamp-profile recorded` is **refused on
+the base model** (it requires a fine-tuned `--policy-path`), so the closed S2 baseline
+can never be re-measured under a wider envelope. Default stays `policy` — omit the flag
+for the normal case.
 
 ## Scoring ladder (same as S2 — strict, decided up front)
 
@@ -78,6 +88,10 @@ $PY -m experiments.s2_zero_shot.run_zero_shot --policy-path "$CKPT" \
    --live --seconds 20 --task "Pick up the red block" --episode-tag s3A_trial_1 --trial
 # Set B: block INSIDE the trained region but between demo spots (interpolation), tag s3B_interp_1 ..
 # Set C: swap in a different object (e.g. a marker), tag s3C_object_1 ..
+
+# If check_dataset flagged the demos beyond policy ±60° (see the RATIFIED block above),
+# add --clamp-profile recorded to EVERY fine-tuned trial (operator + kill switch armed):
+#   $PY -m ...run_zero_shot --policy-path "$CKPT" --clamp-profile recorded --live ...
 ```
 
 `--trial` prompts a 0–4 score after each and appends to
@@ -89,8 +103,9 @@ mean 2.4").
 
 Unlike the S2 baseline (which snapped to one clamped pose), a *working* fine-tuned
 policy makes real reach → descend → grasp motions, and **table contact is now
-intended** for the grasp. It is still clamped to the policy envelope, speed-bounded
-per send, and kill-switched — but it moves purposefully toward the table.
+intended** for the grasp. It is still clamped to the ratified envelope (`policy` by
+default, or `recorded` per the ratification above), speed-bounded per send, and
+kill-switched — but it moves purposefully toward the table.
 
 - Clear everything except the target from the workspace.
 - Grant Input Monitoring so **ESC** works as the kill switch (or keep a hand on the

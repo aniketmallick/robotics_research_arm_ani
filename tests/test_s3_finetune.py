@@ -16,7 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from experiments.s3_finetune import check_dataset, record_picks, s3_config  # noqa: E402
-from experiments.s2_zero_shot import run_zero_shot, smolvla_io  # noqa: E402
+from experiments.s2_zero_shot import clamp, run_zero_shot, smolvla_io  # noqa: E402
 
 
 # --- record_picks: the command that produces a VLA-trainable dataset -----
@@ -201,6 +201,84 @@ def test_build_frame_fills_only_the_fill_keys():
 def test_run_zero_shot_parses_policy_path():
     args = run_zero_shot.build_parser().parse_args(["--policy-path", "/some/ckpt"])
     assert args.policy_path == "/some/ckpt"
+
+
+# --- --clamp-profile: the ratified recorded envelope + the base-refusal guard ------
+def test_clamp_profile_parses_and_defaults_none():
+    assert run_zero_shot.build_parser().parse_args([]).clamp_profile is None
+    assert run_zero_shot.build_parser().parse_args(["--clamp-profile", "recorded"]).clamp_profile == "recorded"
+
+
+def test_resolve_clamp_profile_default_and_precedence(monkeypatch):
+    monkeypatch.delenv("ARMANI_EVAL_CLAMP_PROFILE", raising=False)
+    assert clamp.resolve_clamp_profile(None, is_base=True) == "policy"        # default, no change
+    assert clamp.resolve_clamp_profile(None, is_base=False) == "policy"       # fine-tuned still defaults policy
+    monkeypatch.setenv("ARMANI_EVAL_CLAMP_PROFILE", "recorded")
+    assert clamp.resolve_clamp_profile(None, is_base=False) == "recorded"     # env layer (fine-tuned)
+    assert clamp.resolve_clamp_profile("policy", is_base=False) == "policy"   # cli overrides env
+
+
+def test_resolve_clamp_profile_recorded_REFUSED_on_base_model(monkeypatch):
+    # THE guard: the closed S2 baseline can never be re-measured under a wider envelope.
+    monkeypatch.delenv("ARMANI_EVAL_CLAMP_PROFILE", raising=False)
+    with pytest.raises(SystemExit):
+        clamp.resolve_clamp_profile("recorded", is_base=True)          # via --clamp-profile
+    monkeypatch.setenv("ARMANI_EVAL_CLAMP_PROFILE", "recorded")
+    with pytest.raises(SystemExit):
+        clamp.resolve_clamp_profile(None, is_base=True)                # via env, same refusal
+
+
+def test_resolve_clamp_profile_allowed_for_finetuned_and_rejects_garbage(monkeypatch):
+    monkeypatch.delenv("ARMANI_EVAL_CLAMP_PROFILE", raising=False)
+    assert clamp.resolve_clamp_profile("recorded", is_base=False) == "recorded"  # ratified path
+    with pytest.raises(SystemExit):
+        clamp.resolve_clamp_profile("wider", is_base=False)            # unknown profile
+
+
+def test_policy_clamp_recorded_actually_widens_the_envelope():
+    # Behavioural proof the profile changes the bound: shoulder_lift=80 is outside policy
+    # (+-60, clamped to 60) but inside recorded (+-109, passes untouched).
+    pytest.importorskip("armani.safety")
+    action = {"shoulder_pan": 0.0, "shoulder_lift": 80.0, "elbow_flex": 0.0,
+              "wrist_flex": 0.0, "wrist_roll": 0.0, "gripper": 50.0}
+    pol = clamp.policy_clamp(action, profile="policy")
+    rec = clamp.policy_clamp(action, profile="recorded")
+    assert pol.bit and "shoulder_lift" in pol.bit_joints and pol.clamped["shoulder_lift"] == 60.0
+    assert not rec.bit and rec.clamped["shoulder_lift"] == 80.0
+
+
+def test_run_episode_threads_clamp_profile_to_the_clamp(monkeypatch):
+    # The send-path integration: run_episode must pass the resolved profile into the clamp.
+    import numpy as np
+
+    captured = {}
+    real = clamp.policy_clamp
+
+    def spy(action, profile="policy"):
+        captured["profile"] = profile
+        return real(action, profile=profile)
+
+    monkeypatch.setattr(clamp, "policy_clamp", spy)
+
+    class _Arm:
+        def read_positions(self):
+            return {j: 0.0 for j in ("shoulder_pan", "shoulder_lift", "elbow_flex",
+                                     "wrist_flex", "wrist_roll", "gripper")}
+
+    calls = {"n": 0}
+
+    def stop():
+        calls["n"] += 1
+        return calls["n"] > 1  # False then True: exactly one step processed
+
+    t = [0.0]
+    run_zero_shot.run_episode(
+        arm=_Arm(), read_frame=lambda step: np.zeros((480, 640, 3), dtype=np.uint8),
+        infer_fn=lambda s, f, task: {"shoulder_pan": 0.0}, task="t", live=False, hz=10.0,
+        seconds=999.0, sink=lambda r: None, clamp_profile="recorded",
+        now=lambda: t[0], sleep=lambda dt: t.__setitem__(0, t[0] + dt), stop=stop,
+    )
+    assert captured["profile"] == "recorded"
 
 
 def test_make_infer_fn_forwards_checkpoint_to_load(monkeypatch):

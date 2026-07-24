@@ -146,7 +146,9 @@ device in `docs/spike_s3_results.md`.**
 ## 4. Eval on the arm (`lerobot-vla`, the S2 runner)
 
 The S2 runner loads a fine-tuned checkpoint via `--policy-path`; clamp, kill switch,
-caps, scoring, JSONL are all unchanged. See [`eval.md`](eval.md) for the protocol.
+caps, scoring, JSONL are all unchanged. See [`eval.md`](eval.md) for the protocol —
+including the **architect-ratified `--clamp-profile recorded`** exception (fine-tuned
+eval only, if `check_dataset` flagged the demos beyond policy ±60°; refused on the base).
 
 ```bash
 PY=~/miniforge3/envs/lerobot-vla/bin/python

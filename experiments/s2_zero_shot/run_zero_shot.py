@@ -95,6 +95,7 @@ def run_episode(
     hz: float,
     seconds: float,
     sink: Sink,
+    clamp_profile: str = "policy",
     now: Callable[[], float] = time.perf_counter,
     sleep: Callable[[float], None] = time.sleep,
     stop: Callable[[], bool] = lambda: False,
@@ -112,7 +113,7 @@ def run_episode(
         raise ValueError(f"seconds must be a positive finite number, got {seconds!r}")
     seconds = min(seconds, MAX_EPISODE_SECONDS)
     period = 1.0 / hz if hz > 0 else 0.0
-    stats = EpisodeStats(live=live, clamp_source=clamp.clamp_source())
+    stats = EpisodeStats(live=live, clamp_source=clamp.clamp_source(clamp_profile))
 
     start = now()
     step = 0
@@ -139,7 +140,7 @@ def run_episode(
         }
 
         try:
-            result = clamp.policy_clamp(raw)
+            result = clamp.policy_clamp(raw, profile=clamp_profile)
         except ValueError as exc:
             # A garbage prediction (NaN/inf/unknown joint). Log and DROP it —
             # fail closed, never send. This is exactly the failure the spike
@@ -246,15 +247,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--policy-path", default=None,
                         help="LOCAL fine-tuned checkpoint dir to load instead of lerobot/smolvla_base "
                              "(Spike S3; default: ARMANI_SMOLVLA_CHECKPOINT, else the base model)")
+    parser.add_argument("--clamp-profile", choices=["policy", "recorded"], default=None,
+                        help="send-path clamp envelope. Default 'policy' (S2). 'recorded' (wider, "
+                             "physical−2°) is RATIFIED for the FINE-TUNED S3 eval ONLY (requires "
+                             "--policy-path); refused on the base model. Also ARMANI_EVAL_CLAMP_PROFILE.")
     return parser
 
 
-def _banner(task: str, device: str, live: bool) -> None:
+def _banner(task: str, device: str, live: bool, clamp_profile: str = "policy") -> None:
     print("=" * 68)
     print("  SPIKE S2 — zero-shot SmolVLA baseline (untuned generalist VLA)")
     print(f"  task   : {task!r}")
     print(f"  device : {device}")
-    print(f"  clamp  : {clamp.clamp_source()}  (every action clamped before send)")
+    print(f"  clamp  : {clamp.clamp_source(clamp_profile)}  (every action clamped before send)")
+    if clamp_profile == "recorded":
+        print("  *** RECORDED envelope (wider, physical−2°) — RATIFIED for the FINE-TUNED eval")
+        print("      ONLY. Operator present, kill switch armed, hand on power. ***")
     print(f"  mode   : {'LIVE — the arm WILL move' if live else 'OBSERVE-ONLY — the control loop sends nothing'}")
     if live:
         print("  *** clear the table of all but the target. Hand on ESC. ***")
@@ -297,10 +305,17 @@ def main(argv: list[str] | None = None) -> int:
     from experiments.s2_zero_shot import smolvla_io
     from armani import config, motion, safety
 
+    # Resolve checkpoint + clamp profile UP FRONT so a bad config fails before we open
+    # the camera or energise the arm. resolve_clamp_profile refuses `recorded` on the
+    # base model (protects the closed S2 baseline) — that error must fire pre-hardware.
+    checkpoint = smolvla_io.resolve_checkpoint(args.policy_path)
+    is_base = checkpoint == smolvla_io.MODEL_ID
+    clamp_profile = clamp.resolve_clamp_profile(args.clamp_profile, is_base)
+
     # DRY_RUN (env) or --no-arm both force a simulated arm AND observe-only.
     dry, live = resolve_execution(args, config.DRY_RUN)
 
-    _banner(args.task, device, live)
+    _banner(args.task, device, live, clamp_profile)
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -335,9 +350,7 @@ def main(argv: list[str] | None = None) -> int:
         # Arm (energised but holding position; motion is gated below by --live).
         arm = motion.connect(dry_run=dry, interactive=not dry)
 
-        # Policy + inference closure.
-        checkpoint = smolvla_io.resolve_checkpoint(args.policy_path)
-        is_base = checkpoint == smolvla_io.MODEL_ID
+        # Policy + inference closure (checkpoint/is_base resolved up front, above).
         print(f"[policy] loading {'lerobot/smolvla_base (zero-shot)' if is_base else checkpoint + ' (fine-tuned)'} "
               f"on {device} (first load is slow) ...")
         infer_fn, spec = smolvla_io.make_infer_fn(device=device, checkpoint=None if is_base else checkpoint)
@@ -358,6 +371,7 @@ def main(argv: list[str] | None = None) -> int:
             hz=args.hz,
             seconds=args.seconds,
             sink=sink,
+            clamp_profile=clamp_profile,
             stop=safety.stop_requested,
         )
 
