@@ -388,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             stats = run()
 
-        _report(stats, log_path)
+        _report(stats, log_path, clamp_profile)
         sink(_summary_record(args, device, stats))
 
         if args.trial:
@@ -444,13 +444,21 @@ def _summary_record(args: argparse.Namespace, device: str, stats: EpisodeStats) 
     }
 
 
-def _report(stats: EpisodeStats, log_path: Path) -> None:
+def _report(stats: EpisodeStats, log_path: Path, clamp_profile: str = "policy") -> None:
     print("-" * 68)
     print(f"  steps            : {stats.n_steps}  over {stats.elapsed_s:.1f}s")
     print(f"  clamp bit        : {stats.clamp_bit_steps}/{stats.n_steps} steps ({stats.clamp_bit_rate * 100:.0f}%)")
     if stats.per_joint_bit_counts:
         worst = ", ".join(f"{j}:{n}" for j, n in stats.per_joint_bit_counts.most_common())
         print(f"  clamp by joint   : {worst}")
+    # Warn-only diagnostic: under the wider `recorded` profile, a clamp bite means the
+    # policy commanded past even that envelope — i.e. into the outermost 2° margin that
+    # keeps the arm off its hard stops (recorded = calibrated range −2°), not lost
+    # workspace. Signal, never a block — the action was still clamped and sent bounded.
+    if clamp_profile == "recorded" and stats.clamp_bit_steps:
+        print(f"  [warn] policy strained PAST the recorded envelope on {stats.clamp_bit_steps}/"
+              f"{stats.n_steps} steps — commanding into the outermost 2° off-hard-stop margin,")
+        print("         not lost workspace. Diagnostic only; every action was still clamped + bounded.")
     if stats.invalid_steps:
         print(f"  invalid (dropped): {stats.invalid_steps} steps (NaN/unknown — never sent)")
     print("-" * 68)

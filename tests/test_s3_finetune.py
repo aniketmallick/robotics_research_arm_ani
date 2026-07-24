@@ -281,6 +281,24 @@ def test_run_episode_threads_clamp_profile_to_the_clamp(monkeypatch):
     assert captured["profile"] == "recorded"
 
 
+def test_report_warns_only_when_recorded_strains_past_its_envelope(capsys):
+    from collections import Counter
+
+    stats = run_zero_shot.EpisodeStats()
+    stats.n_steps, stats.clamp_bit_steps = 10, 3
+    stats.per_joint_bit_counts = Counter({"elbow_flex": 3})
+
+    run_zero_shot._report(stats, Path("/x"), "recorded")            # recorded + bit -> warn
+    assert "[warn]" in capsys.readouterr().out
+
+    run_zero_shot._report(stats, Path("/x"), "policy")             # policy -> never this warn
+    assert "strained PAST the recorded" not in capsys.readouterr().out
+
+    stats.clamp_bit_steps = 0
+    run_zero_shot._report(stats, Path("/x"), "recorded")           # recorded but clean -> no warn
+    assert "[warn]" not in capsys.readouterr().out
+
+
 def test_make_infer_fn_forwards_checkpoint_to_load(monkeypatch):
     # Proves the flag SWAPS the policy source without loading a real model: make_infer_fn
     # must pass the checkpoint through to load().
