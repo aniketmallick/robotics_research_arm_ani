@@ -124,55 +124,64 @@ The arm will drive *decisively* to one fixed clamped pose and hold — bounded a
 speed-limited by the safety stack, but a real, large motion. Operator: expect a
 snap-to-one-pose, not gentle drift, on `--live`.
 
-## Part B/C — the trials (NEEDS THE OPERATOR + ARM)
+## Part B/C — the trials (measured 2026-07-24, operator + arm)
 
-Primary task "Pick up the red block", 10 trials:
+Primary task "Pick up the red block", **2 live trials** (block repositioned between
+them). Both **0/4** — total failure. Values from `trials.csv` + `logs/episode_trial_*.jsonl`.
 
-| trial | score 0–4 | clamp-bit rate | notes (what it actually did) |
+| trial | score 0–4 | clamp-bit rate | what it actually did |
 |---|---|---|---|
-| 1 | **TODO** | TODO | |
-| 2 | **TODO** | TODO | |
-| 3 | **TODO** | TODO | |
-| 4 | **TODO** | TODO | |
-| 5 | **TODO** | TODO | |
-| 6 | **TODO** | TODO | |
-| 7 | **TODO** | TODO | |
-| 8 | **TODO** | TODO | |
-| 9 | **TODO** | TODO | |
-| 10 | **TODO** | TODO | |
-| **mean** | **TODO / 4** | **TODO %** | |
+| 1 | **0** | 100 % (110 steps) | drove toward the block, then opened the gripper wide and **dragged across the table** — clamp-saturated thrash, not a reach |
+| 2 | **0** | 98 % (63 steps) | no purposeful motion (operator's note: "total bullshit") |
+| **mean** | **0 / 4** | **~99 %** | |
 
-Alternate phrasings:
+**Why 2 trials and not the protocol's 10:** `check_stats` had already proven,
+*headless*, that the model's output is near-identical on a synthetic vs a real frame
+— it regresses to its mean and ignores the image. The two live trials confirm the
+failure is real and total; because the policy has **zero** task competence, more
+trials only re-measure the same null. The per-trial *trajectory* varies (flow-matching
+sampling is stochastic — T1 thrashed, T2 was near-static), but every one is
+non-task-directed, so ten repetitions of a null is one data point, not ten. The 2×2
+alternate-phrasing trials were skipped for the same reason: with the scene ignored,
+wording cannot move a mean-pose output.
 
-| phrasing | trial a | trial b | difference noted |
-|---|---|---|---|
-| "Grab the red cube" | TODO | TODO | |
-| "Pick up the block and lift it" | TODO | TODO | |
+- **Clamp-hit rate (live, trial 1):** **100 %** of steps clamped, **body-joint
+  dominated** — `shoulder_lift` **110/110**, `gripper` 100/110, `elbow_flex` 77/110,
+  `wrist_roll` 60/110, `wrist_flex` 5/110. A logged raw prediction shows how far out
+  of bounds it ran: `shoulder_lift 245°`, `wrist_roll 349°`, `gripper 163°` → all
+  clamped to the policy envelope (60° / 150° / 100 %), then bounded again per-send by
+  `max_relative_target`. This is exactly the headless observe-only preview
+  (49/49 steps, shoulder_lift/elbow/wrist_roll saturating) confirmed on hardware.
+- **Evidence:** `experiments/s2_zero_shot/{trials.csv, logs/episode_trial_*.jsonl}`.
 
-- **Clamp-hit rate (live):** TODO % of steps had ≥1 joint clamped. Worst joints: TODO.
-- **Headless preview (synthetic frame, observe-only, post-fix, 49 steps):** the clamp
-  bit on **49/49 steps (100 %)** — `shoulder_lift` and `elbow_flex` on every step
-  (raw ~110–205° → clamped to 60°), `wrist_roll` on every step (raw ~250° → 150°),
-  plus `wrist_flex`/`gripper` on most. This is the real signal: the so100-convention
-  targets sit far outside our envelope, so the clamp saturates the body joints — the
-  arm would drive to one fixed clamped pose. (Pre-fix this was a misleading
-  gripper-only 88 %; that was the un-normalization bug.) The live rate on the real
-  C920 is the number that counts.
-- **Evidence kept:** TODO (paths / video).
+## Conclusion — S2 closed on evidence
 
-## Conclusion (3 sentences — fill after the arm run)
+**Zero-shot SmolVLA-base on this novel rig is a total failure: 0/2 — and the failure
+is the MODEL's, not the harness.** The integrity gate (`check_stats`) confirmed the
+action unnormalize stats are real and routed (so100), so the model genuinely emits
+its pretraining **mean pose in the foreign so100 servo-degree convention** (shoulder
+~113–121°, elbow ~110–116°) and **ignores the scene** — it does not transfer to our
+SO-101 at all, and the clamp saturates its out-of-envelope targets. That is the whole
+point: **this measured zero is the baseline S3 (fine-tuning on our teleop data, in our
+convention) must beat.** Any task-directed behavior is a measurable improvement over
+regress-to-mean.
 
-**Predicted from the headless measurement (confirm on hardware):** untuned
-`smolvla_base` **regresses to its pretraining mean pose and ignores the object** —
-its normalized output is ~0 regardless of the image, so it emits one fixed pose in
-the foreign **so100 servo-degree** convention, which the clamp saturates against our
-±60/90 envelope. Predicted trial outcome: **score ~0** (no task-directed motion) on
-most/all trials; the arm snaps to a fixed clamped pose. That is the honest baseline
-Spike S3 (fine-tuning on our teleop data, in our convention) must beat — **any**
-task-directed behavior is a measurable improvement over regress-to-mean.
+Two secondary findings, both material for what comes next:
 
-**TODO after the 10 live trials:** confirm the above, fill the mean score, note
-whether alt phrasings change anything (unlikely, given scene-invariance), and record
-the live clamp-bit **per-joint** breakdown (`per_joint_bit_counts` in the summary
-record) — expect it dominated by `shoulder_lift`/`elbow_flex`/`wrist_roll`
-saturation, NOT the gripper.
+1. **Compute is not the bottleneck — data is.** The M1 Max runs this 450M-parameter
+   VLA at **~528 ms per 50-action chunk on MPS = ~10.6 ms/step (~10 Hz), real-time**
+   (30 s load; CPU at 11.9 s/chunk is dead, so MPS is load-bearing). The Mac can *run*
+   a SmolVLA-class System-1 policy live — what's missing is in-domain training, not FLOPs.
+2. **The safety envelope held at 100 %.** A completely untrusted 450M black box
+   emitting joint targets up to 245° / 349° was fully contained: every out-of-bounds
+   prediction clamped to the policy envelope, every send bounded by
+   `max_relative_target`, **no joint-limit violation across either trial**. The trust
+   layer survives a garbage black-box policy — exactly what it exists for. *Caveat,
+   consistent with the S1 verdict:* joint-space bounding is not task-space safety —
+   trial 1 still dragged the gripper across the table. Clamps protect the arm, not the
+   scene; grasp-grade safety needs depth + task-space checks.
+
+**S2 closed:** modular perception + a homography is the wrong tool for grasping
+(S1: 2.5D, no depth), and a zero-shot generalist VLA has no transfer to this rig
+(S2: regress-to-mean). The path forward is fine-tuning on in-domain data (S3) on top
+of the safety layer that just proved it can contain an arbitrary policy.
