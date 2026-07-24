@@ -243,6 +243,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-index", type=int, default=None, help="C920 OpenCV index (default: ARMANI_CAMERA_INDEX)")
     parser.add_argument("--synthetic-frame", action="store_true", help="headless: feed a generated frame, no camera")
     parser.add_argument("--no-arm", action="store_true", help="headless: use a simulated arm (implies observe-only)")
+    parser.add_argument("--policy-path", default=None,
+                        help="LOCAL fine-tuned checkpoint dir to load instead of lerobot/smolvla_base "
+                             "(Spike S3; default: ARMANI_SMOLVLA_CHECKPOINT, else the base model)")
     return parser
 
 
@@ -333,8 +336,11 @@ def main(argv: list[str] | None = None) -> int:
         arm = motion.connect(dry_run=dry, interactive=not dry)
 
         # Policy + inference closure.
-        print(f"[policy] loading lerobot/smolvla_base on {device} (first load is slow) ...")
-        infer_fn, spec = smolvla_io.make_infer_fn(device=device)
+        checkpoint = smolvla_io.resolve_checkpoint(args.policy_path)
+        is_base = checkpoint == smolvla_io.MODEL_ID
+        print(f"[policy] loading {'lerobot/smolvla_base (zero-shot)' if is_base else checkpoint + ' (fine-tuned)'} "
+              f"on {device} (first load is slow) ...")
+        infer_fn, spec = smolvla_io.make_infer_fn(device=device, checkpoint=None if is_base else checkpoint)
         print(f"[policy] {spec.summary()}")
 
         if live:

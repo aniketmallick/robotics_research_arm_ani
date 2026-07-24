@@ -24,6 +24,10 @@ conda create -y -n lerobot-vla python=3.12
 # uses (identical calibration/dataset formats). [smolvla] pulls transformers etc.
 ~/miniforge3/envs/lerobot-vla/bin/pip install '/Users/Aniket.Mallick/Documents/Claude/Projects/Robotics/lerobot[smolvla]'
 ~/miniforge3/envs/lerobot-vla/bin/pip install python-dotenv pytest   # dotenv: lets the runner reuse armani.safety
+# Robot deps for the LIVE/observe path (lerobot lazily require_package()s these when
+# motion.connect() builds the SO-101 bus + processor pipeline — the [smolvla] extra
+# does NOT pull them). Needed for --live and real-camera observe; NOT for --no-arm.
+~/miniforge3/envs/lerobot-vla/bin/pip install feetech-servo-sdk deepdiff pynput
 ```
 
 The demo `lerobot` env gets **zero** new packages. Resolved versions are written

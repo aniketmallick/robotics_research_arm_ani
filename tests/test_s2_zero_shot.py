@@ -202,9 +202,12 @@ def test_clamp_source_reports_armani_when_available():
 
 
 # --- smolvla_io pure logic (no model) -----------------------------------
-def _spec(action_dim=6, state_dim=6):
+def _spec(action_dim=6, state_dim=6, fill_image_keys=None):
+    cams = ("observation.images.camera1", "observation.images.camera2", "observation.images.camera3")
     return smolvla_io.PolicySpec(
-        image_keys=("observation.images.camera1", "observation.images.camera2", "observation.images.camera3"),
+        model_ref=smolvla_io.MODEL_ID,
+        image_keys=cams,
+        fill_image_keys=cams if fill_image_keys is None else fill_image_keys,
         state_dim=state_dim, action_dim=action_dim, chunk_size=50, device="cpu",
         stats_dataset="so100", routed_features=("observation.state", "action"),
     )

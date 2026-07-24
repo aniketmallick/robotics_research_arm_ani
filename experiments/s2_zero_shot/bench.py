@@ -53,6 +53,11 @@ def collect_versions() -> dict[str, str]:
         "numpy": np.__version__,
         "opencv-python-headless": _pkg("opencv-python-headless"),
         "accelerate": _pkg("accelerate"),
+        # Robot path deps (lazily require_package()'d by lerobot when motion.connect()
+        # builds the SO-101 bus + processor pipeline). Not pulled by [smolvla].
+        "feetech-servo-sdk": _pkg("feetech-servo-sdk"),
+        "deepdiff": _pkg("deepdiff"),
+        "pynput": _pkg("pynput"),
         "mps_available": str(torch.backends.mps.is_available()),
         "cuda_available": str(torch.cuda.is_available()),
     }
@@ -171,7 +176,8 @@ def _write_env_report(report: dict) -> None:
     lines.append("## Policy feature spec (discovered from lerobot/smolvla_base)\n")
     lines.append(f"- state_dim: **{spec.state_dim}** (our arm has 6 joints)")
     lines.append(f"- action_dim: **{spec.action_dim}** (mapped positionally onto our 6 joints — OOD)")
-    lines.append(f"- cameras expected: **{list(spec.image_keys)}** (we feed the one C920 frame to all)")
+    lines.append(f"- cameras declared: **{list(spec.image_keys)}**; filled from our one C920: "
+                 f"**{list(spec.fill_image_keys)}** (base: all three; a fine-tuned 1-camera checkpoint: just the one)")
     lines.append(f"- chunk_size / n_action_steps: **{spec.chunk_size}**")
     lines.append(f"- model construct + load time: **{report['load_s']:.1f} s**\n")
     lines.append("## Latency (synthetic observation)\n")

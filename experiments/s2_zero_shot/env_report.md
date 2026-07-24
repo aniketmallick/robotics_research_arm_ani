@@ -20,6 +20,11 @@ Note: PyPI has no `lerobot==0.5.2`, so it was installed from the SAME local
 dataset formats. `python-dotenv` was added to this env so the runner can reuse
 the real `armani.safety.clamp_action`; the demo env got zero new packages.
 
+Robot-path deps (added 2026-07-24 — `[smolvla]` does NOT pull them, but
+`motion.connect()` lazily requires them for `--live`/real-camera observe):
+`feetech-servo-sdk` 1.0.0, `deepdiff` 9.1.0, `pynput` 1.8.2 (+ pyserial, pyobjc).
+Not needed for `--no-arm`. Install: `pip install feetech-servo-sdk deepdiff pynput`.
+
 ## Policy feature spec (discovered from lerobot/smolvla_base)
 
 - state_dim: **6** (our arm has 6 joints)
