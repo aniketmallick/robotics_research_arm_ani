@@ -64,6 +64,62 @@ def length_outliers(lengths: list[int], tol: float = 0.4) -> list[int]:
     return [i for i, n in enumerate(lengths) if abs(n - median) > tol * median]
 
 
+def action_joint_names(features: dict, fallback: tuple[str, ...]) -> list[str]:
+    """Joint names for the action vector (suffixes like '.pos' stripped), from the
+    feature spec; falls back to ``fallback`` if the spec has none. Pure/testable."""
+    names = (features.get("action") or {}).get("names")
+    if isinstance(names, dict):  # occasionally nested, e.g. {"motors": [...]}
+        names = next((v for v in names.values() if isinstance(v, list)), None)
+    if isinstance(names, list) and names:
+        return [str(n).split(".")[0] for n in names]
+    return list(fallback)
+
+
+def joint_ranges(stats: dict, names: list[str]) -> dict[str, tuple[float, float]]:
+    """Per-joint (min, max) of the ACTION across all demos, from meta/stats.json.
+
+    Empty if stats has no action min/max. This is the number the architect needs to
+    set the eval clamp profile (policy vs recorded). Pure/testable.
+    """
+    action = stats.get("action") or {}
+    lo, hi = action.get("min"), action.get("max")
+    if not (isinstance(lo, list) and isinstance(hi, list)):
+        return {}
+    n = min(len(lo), len(hi), len(names))
+    return {names[i]: (float(lo[i]), float(hi[i])) for i in range(n)}
+
+
+def envelope_exceedances(
+    ranges: dict[str, tuple[float, float]], limits: dict[str, tuple[float, float]]
+) -> list[tuple[str, tuple[float, float], tuple[float, float]]]:
+    """Joints whose demonstrated action range falls outside ``limits``.
+
+    Returns (joint, (demo_lo, demo_hi), (limit_lo, limit_hi)) per offending joint.
+    A table-reaching pick very likely exceeds the policy envelope on
+    shoulder_lift/elbow_flex/wrist_flex (S1 geometry) — that is expected and is a
+    profile decision for the architect, not a failure. Pure/testable.
+    """
+    out: list[tuple[str, tuple[float, float], tuple[float, float]]] = []
+    for joint, (lo, hi) in ranges.items():
+        lim = limits.get(joint)
+        if lim is None:
+            continue
+        if lo < lim[0] or hi > lim[1]:
+            out.append((joint, (lo, hi), (lim[0], lim[1])))
+    return out
+
+
+def read_stats(root: Path) -> dict:
+    """meta/stats.json (aggregated per-feature stats) or {} if absent/unreadable."""
+    path = root / "meta" / "stats.json"
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (ValueError, OSError):
+        return {}
+
+
 def episode_lengths(root: Path) -> list[int]:
     """Per-episode frame counts, in episode order, from meta/episodes/*.parquet."""
     import pyarrow.parquet as pq
@@ -123,6 +179,34 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ⚠ length OUTLIERS at episode index {outliers} — likely fumbled takes; re-record "
                   "or drop them (SOP: train on clean successes only).")
     print()
+
+    # Per-joint action range across the demos — the number the architect needs to set
+    # the eval clamp profile. NOT a pass/fail: a table-reaching pick very likely exceeds
+    # the policy envelope on shoulder_lift/elbow_flex/wrist_flex (S1 geometry). Default
+    # eval clamp stays `policy`; if the demos exceed it, send these numbers to the
+    # architect, who ratifies `recorded` for the fine-tuned eval ONLY (explicit exception).
+    try:
+        from armani import config
+        canon_joints, policy_limits = config.JOINTS, config.LIMIT_PROFILES["policy"]
+    except Exception:  # armani not importable here -> report raw ranges, skip flagging
+        canon_joints, policy_limits = (), {}
+    ranges = joint_ranges(read_stats(root), action_joint_names(features, canon_joints))
+    if ranges:
+        print("  action range / joint (degrees; gripper is %):")
+        for joint, (lo, hi) in ranges.items():
+            print(f"    {joint:<14} [{lo:8.1f}, {hi:8.1f}]")
+        exceed = envelope_exceedances(ranges, policy_limits)
+        if exceed:
+            print("  ⚠ demos EXCEED the policy envelope (±60° on lift/elbow/wrist_flex) on:")
+            for joint, (lo, hi), (llo, lhi) in exceed:
+                print(f"      {joint}: demos [{lo:.1f}, {hi:.1f}] vs policy [{llo:.0f}, {lhi:.0f}]")
+            print("  → SEND these ranges to the architect. Eval clamps `policy` by default; if the")
+            print("    demos need more, the architect ratifies `recorded` for the fine-tuned eval")
+            print("    ONLY (operator-present + kill-switch). Do NOT distort the grasp to fit policy —")
+            print("    record the natural pick; the clamp profile is decided from these numbers.")
+        elif policy_limits:
+            print("  ✓ all demos within the policy envelope — eval's default `policy` clamp fits.")
+        print()
 
     if problems:
         print("PROBLEMS — fix before training:")

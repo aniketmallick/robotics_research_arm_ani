@@ -38,6 +38,9 @@ export ARMANI_CAMERA_INDEX=0
 python experiments/s3_finetune/record_picks.py           # DRY RUN — print the command
 python experiments/s3_finetune/record_picks.py --go      # record (→ next, ← redo, ESC finish)
 python experiments/s3_finetune/check_dataset.py          # camera? 6-D state/action? outliers?
+#   Also prints the per-joint ACTION range. If it flags demos beyond the policy
+#   envelope (±60° on lift/elbow/wrist_flex — likely for a table grasp), send those
+#   numbers to the architect: they set the eval clamp profile (see eval.md).
 ```
 
 `record_picks.py` wraps the proven `lerobot-record` teleop flow **plus the C920**
@@ -116,6 +119,12 @@ lerobot-train \
 
 **Expected wall-clock:** A100 ≈ 3–5 h at 20k/batch 64; T4 much slower — halve steps
 (10k, `scheduler_decay_steps=10000`) and batch 16, still ~6–10 h.
+
+**Don't fly the train blind.** W&B is off by default so an unattended Colab run can't
+stall on a login prompt — but for *your* run, **turn it on**: `wandb login` (free), then
+`--wandb.enable=true`. The loss curve is how you catch a broken or overfitting train at
+minute 10 instead of after a wasted multi-hour run + eval. No W&B account? At least
+watch the console/TensorBoard loss — just don't run it unwatched with no loss signal.
 
 **Resume after a Colab disconnect** (works only if `--output_dir` was on Drive):
 

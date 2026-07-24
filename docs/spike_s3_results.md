@@ -28,6 +28,8 @@ is an improvement; the bar for "S3 worked" is a real, repeatable pick success ra
 | codebase_version | **TODO** (expect v3.0) — Colab lerobot must match |
 | camera key(s) | **TODO** (expect `observation.images.camera1` — named to match smolvla_base) |
 | length min/median/max (frames) | **TODO** |
+| per-joint action range | **TODO** (`check_dataset.py`; sent to the architect for the clamp-profile call) |
+| eval clamp profile (ratified) | **TODO** (`policy` ±60° default, or `recorded` if the demos exceeded it) |
 | Hub repo | **TODO** (`anikmall/armani_pick_red_v1`, private) |
 
 ## Training config (fill after the run — REQUIRED for reproducibility)

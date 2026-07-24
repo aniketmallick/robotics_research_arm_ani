@@ -103,6 +103,29 @@ def test_length_outliers():
     assert check_dataset.length_outliers([]) == []
 
 
+# --- per-joint action range (the number the architect sets the clamp profile from) ---
+def test_action_joint_names_strips_suffix_and_falls_back():
+    feats = {"action": {"names": ["shoulder_pan.pos", "gripper.pos"]}}
+    assert check_dataset.action_joint_names(feats, ("a", "b")) == ["shoulder_pan", "gripper"]
+    assert check_dataset.action_joint_names({}, ("x", "y")) == ["x", "y"]  # no names -> fallback
+
+
+def test_joint_ranges_from_stats():
+    stats = {"action": {"min": [-59.6, -110.4], "max": [48.1, 69.2]}}
+    ranges = check_dataset.joint_ranges(stats, ["shoulder_pan", "shoulder_lift"])
+    assert ranges == {"shoulder_pan": (-59.6, 48.1), "shoulder_lift": (-110.4, 69.2)}
+    assert check_dataset.joint_ranges({}, ["shoulder_pan"]) == {}  # no stats -> empty
+
+
+def test_envelope_exceedances_flags_only_out_of_policy_joints():
+    # Real SO-101 manipulation numbers: pan fits ±90; lift blows past ±60 (S1 geometry).
+    ranges = {"shoulder_pan": (-59.6, 48.1), "shoulder_lift": (-110.4, 69.2)}
+    limits = {"shoulder_pan": (-90.0, 90.0), "shoulder_lift": (-60.0, 60.0)}
+    exceed = check_dataset.envelope_exceedances(ranges, limits)
+    assert [e[0] for e in exceed] == ["shoulder_lift"]
+    assert exceed[0] == ("shoulder_lift", (-110.4, 69.2), (-60.0, 60.0))
+
+
 # --- s3_config -----------------------------------------------------------
 def test_s3_config_defaults():
     assert s3_config.REPO_ID == "anikmall/armani_pick_red_v1"

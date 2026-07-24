@@ -28,14 +28,16 @@ strategy and repeat it.
 | **grasp height** | close the gripper at the **same height** above the table each time. |
 | **lift height** | lift to the **same height**, then stop. |
 
-> **Keep the whole pick inside the policy envelope.** You record in teleop (the wider
-> `recorded` profile), but **eval clamps every action to the `policy` profile** —
-> shoulder_lift / elbow_flex / wrist_flex to **±60°**. Choose an approach and grasp
-> height whose joint angles stay inside ±60° on those three joints. If a comfortable
-> table-reaching grasp needs more than ±60° (the S1 geometry finding — near-vertical
-> reach is marginal there), add a **riser** under the block so the arm grasps higher and
-> stays in-envelope. Demos that live outside ±60° will train a policy the eval clamp
-> strangles exactly at the grasp — the fine-tune can't win against geometry.
+> **Record the natural pick — do NOT contort it to fit the clamp.** You record in
+> teleop (the wider `recorded` profile). A comfortable table-reaching grasp very likely
+> needs shoulder_lift / elbow_flex / wrist_flex beyond ±60° (the S1 geometry finding —
+> near-vertical reach is marginal there). That is fine and expected: demonstrate a
+> **clean, consistent** grasp, don't distort it to stay inside ±60°. After recording,
+> `check_dataset.py` reports the **per-joint action range**; send those numbers to the
+> architect, who sets the eval clamp profile from them (default `policy` ±60°; if the
+> demos exceed it, the architect ratifies the `recorded` profile for the fine-tuned
+> eval only). A **riser** under the block is a fallback if a tighter live envelope is
+> wanted. The one hard rule stays: keep the grasp *identical* across all demos.
 
 ## VARIED — the ONLY thing that changes
 

@@ -31,18 +31,27 @@ base-load), so a mistagged base run can't slip through.
 Expect (fine-tuned): action targets in OUR degree convention (roughly the demo joint
 ranges), NOT the so100 servo-degree convention (~120°) the base emitted.
 
-**Read the clamp-bit rate as a diagnosis, not just a pass/fail.** Eval clamps with the
-`policy` profile (shoulder_lift/elbow_flex/wrist_flex = ±60°), but the demos were
-teleop-recorded in the wider `recorded` profile and may legitimately reach beyond ±60°
-to touch the table (the S1 geometry finding: near-vertical table reach is marginal
-within ±60°). A faithfully-cloned policy predicts those same targets, so:
-- **Low clamp-bit rate** → the learned grasp lives inside the policy envelope. Good.
-- **High rate, concentrated on shoulder_lift/elbow_flex/wrist_flex** → the demonstrated
-  reach exceeds the ±60° envelope. That is an **envelope/geometry problem, NOT a bad
-  checkpoint** — the arm physically can't complete the pick under the policy clamp no
-  matter how well training converged. Reconcile before trusting the eval: keep demos
-  inside the envelope (SOP), add a riser, or eval a wider profile as a deliberate,
-  reviewer-approved exception. Do **not** misread it as "wrong checkpoint or stats."
+**Clamp profile is decided from the data, before eval — measure first.** Eval clamps
+with the `policy` profile (shoulder_lift/elbow_flex/wrist_flex = ±60°) **by default**,
+but the demos were teleop-recorded in the wider `recorded` profile and a table-reaching
+grasp very likely exceeds ±60° (the S1 geometry finding). A policy trained on
+recorded-envelope demos and then clamped *tighter* than those demos gets strangled at
+the grasp and produces a **false zero** — the clamp lying, not the policy failing.
+
+So the profile is set from `check_dataset.py`'s per-joint action range, not guessed at
+eval:
+- **Demos within ±60°** (checker says "within the policy envelope") → keep the default
+  `policy` clamp; a high clamp-bit rate then really would mean a bad checkpoint/stats.
+- **Demos exceed ±60°** (checker flags shoulder_lift/elbow_flex/wrist_flex) → **send the
+  ranges to the architect.** The recorded profile is already a ratified safe bound and a
+  fine-tuned policy is far closer to "replaying teleop" (recorded) than to "untrusted
+  LLM JSON" (policy). The architect ratifies the `recorded` profile for the **fine-tuned
+  eval ONLY** — operator-present + kill-switch mandatory, documented as an explicit
+  exception. **That profile switch is NOT wired yet** (default is `policy`); it will be
+  added in a reviewed change once the ranges confirm it's needed. A riser under the
+  block stays as the fallback if the recorded envelope feels too loose live.
+
+Do **not** misread a geometry-driven high clamp-bit rate as "wrong checkpoint or stats."
 
 ## Scoring ladder (same as S2 — strict, decided up front)
 
