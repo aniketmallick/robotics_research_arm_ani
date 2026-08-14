@@ -169,19 +169,24 @@ for the normal case.
 **success RATE**, not one shot.
 
 > **RATIFIED scoring rule — score the BEST state the arm reached during the episode, not
-> the state it ended in.** Decided before the first trial and held for every scored trial
-> in all three sets. A policy that grasps and lifts at 22 s and then wanders off and drops
+> the state it ended in.** Decided before the first trial and held for all 21 runs —
+> Sets A/B/C and the Set D baseline alike, or the comparison is scored two different ways. A policy that grasps and lifts at 22 s and then wanders off and drops
 > the block scored a 4; post-success wandering does not erase a success. This is also why
 > you stop the episode once the outcome is decided — the two rules work together, and
 > without the first one the second would quietly cost you successes.
 
 ## Trials — reset (object + arm to rest) between every one
 
+**21 runs total: 18 scored trials of the fine-tuned checkpoint (A/B/C) + 3 matched
+zero-shot baseline runs (D).** D is not in the table below because it does not test the
+checkpoint — it re-measures the base model under *this* protocol so the comparison is not
+against a differently-run baseline.
+
 | set | positions | n | what it measures |
 |---|---|---|---|
-| **A — trained** | inside the training region, near demo spots | ~10 | did it learn the task? |
-| **B — interpolation** | INSIDE the trained 20×15 region, but BETWEEN demonstrated grid spots | ~5 | does it generalize in-distribution (interpolate between demos)? |
-| **C — novel object** | a different object, trained region | ~3 | specificity — **expect failure** (it learned "red block", not "grasp") |
+| **A — trained** | inside the training region, near demo spots | 10 | did it learn the task? |
+| **B — interpolation** | INSIDE the trained 20×15 region, but BETWEEN demonstrated grid spots | 5 | does it generalize in-distribution (interpolate between demos)? |
+| **C — novel object** | a different object, trained region | 3 | specificity — **expect failure** (it learned "red block", not "grasp") |
 
 Set B is *interpolation* — positions inside the trained region that fall between the
 grid spots you demonstrated. It is NOT the area outside the region (that is
@@ -200,6 +205,43 @@ $PY -m experiments.s2_zero_shot.run_zero_shot --policy-path "$CKPT" \
 `--clamp-profile recorded` belongs on EVERY fine-tuned trial here because `check_dataset`
 flagged the demos beyond policy ±60° (see the RATIFIED block above) — operator present,
 kill switch armed. Drop it only if a future dataset stays inside ±60°.
+
+### Set D — matched zero-shot baseline (3 runs, base model)
+
+Three runs of `lerobot/smolvla_base` under **this** protocol — same task, same rate and
+window, same scoring rule, block at Set A's positions. Omit `--policy-path` entirely:
+
+```bash
+# tags s3D_base_1 .. _3; block at three of Set A's positions
+$PY -m experiments.s2_zero_shot.run_zero_shot \
+   --live --hz 30 --seconds 45 \
+   --task "Pick up the red block" --episode-tag s3D_base_1 --trial
+```
+
+**These runs are matched on everything except the clamp envelope, and that is
+deliberate.** `--clamp-profile recorded` is *refused* on the base model (exit 1) — the
+whole point of that refusal is that the closed S2 baseline can never be re-measured under
+a wider envelope. So Set D runs under `policy` (±60°) while A/B/C run under `recorded`.
+
+State that in the results, and state why it does not rescue the baseline: the base model
+emits so100-convention targets that saturate ±60° on essentially every step, so it is not
+being denied a reach it would otherwise have made — it never produces our convention's
+numbers in the first place. A wider envelope would let it drive *further* wrong, not
+closer to the block. Measured headless under **this** protocol (`--hz 30 --seconds 45`):
+**936/936 steps clamped — 100%** — with `shoulder_lift` and `elbow_flex` saturating on
+every single step, matching S2's live 100% / 98.4%. Its action stats confirm the
+convention gap directly: mean `[1.6, 119.9, 109.8, 56.7, -27.4, 12.0]` (so100 servo
+degrees) against the fine-tune's `[14.1, -40.7, 50.2, 65.4, -3.2, 11.1]` (ours).
+
+Set D rows are distinguishable in `trials.csv` without relying on the tag: `model_ref` is
+`lerobot/smolvla_base` and `model_revision` resolves to the cached commit. The two closed
+S2 rows carry the same `model_ref` but a **blank** revision, which is how you tell
+"re-measured under the S3 protocol" from "the original July baseline".
+
+The banner also says which it is — `SPIKE S2 — zero-shot SmolVLA baseline` and
+`stats=pretrain:so100 (routed [...])`, versus `SPIKE S3 — FINE-TUNED` and
+`stats=checkpoint:<dir>` for A/B/C. Check it before each run; a mistagged base run is the
+one error this whole file exists to prevent.
 
 `--trial` prompts a 0–4 score after each and appends to
 `experiments/s2_zero_shot/trials.csv`, which is now self-describing: every row carries

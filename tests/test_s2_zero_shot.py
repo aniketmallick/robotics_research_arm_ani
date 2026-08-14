@@ -496,6 +496,12 @@ def test_resolve_stats_base_routes_the_pretraining_dataset():
     assert dataset == "so100"
     assert set(routed) == {"observation.state", "action"}
 
+    # One feature routed in BOTH pipelines is one feature routed, not two: the real base
+    # model routes "action" in each and used to print `routed ['action', 'action']`.
+    both = _FakePipe(_StatsStep({"so100.buffer.action": _mean_std(1, 2)}))
+    other = _FakePipe(_StatsStep({"so100.buffer.action": _mean_std(1, 2)}))
+    assert smolvla_io.resolve_stats(both, other, smolvla_io.MODEL_ID, "so100")[2] == ("action",)
+
 
 def test_resolve_stats_finetuned_uses_its_own_and_never_routes():
     """FIX 3: a fine-tuned checkpoint's own MEAN_STD stats, never generic so100 ones.

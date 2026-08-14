@@ -276,7 +276,12 @@ def resolve_stats(
     if model_ref == MODEL_ID:
         # Base: multi-embodiment stats keyed "<dataset>.buffer.<feature>" — alias one
         # pretraining dataset's onto the bare keys or normalization silently no-ops.
-        routed = tuple(route_dataset_stats(preprocessor, dataset) + route_dataset_stats(postprocessor, dataset))
+        # Deduped across the two pipelines: "action" routed in both is one feature
+        # routed, not two. The un-deduped list printed `['action', 'action']`, which
+        # reads like a bug in the banner the operator checks before a baseline run.
+        routed = tuple(dict.fromkeys(
+            route_dataset_stats(preprocessor, dataset) + route_dataset_stats(postprocessor, dataset)
+        ))
         if missing_stats(postprocessor, ("action",)):
             log.error(
                 "action unnormalize stats absent for the base model (dataset=%r) — outputs would "
