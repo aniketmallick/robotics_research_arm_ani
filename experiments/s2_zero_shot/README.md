@@ -142,14 +142,15 @@ CKPT=~/models/smolvla_pick_red_v1
 
 # headless first — confirms the checkpoint, its OWN stats, and the clamp envelope:
 $PY -m experiments.s2_zero_shot.run_zero_shot --no-arm --synthetic-frame \
-    --seconds 90 --clamp-profile recorded --policy-path "$CKPT"
+    --hz 30 --seconds 30 --clamp-profile recorded --policy-path "$CKPT"
 ```
 
-Read four lines of that output before trusting anything downstream:
+Read five lines of that output before trusting anything downstream:
 
 | line | must say |
 |---|---|
 | header + `model  :` | `SPIKE S3 — FINE-TUNED SmolVLA eval` and your checkpoint dir |
+| `rev    :` | the commit the checkpoint was downloaded from (blank if it was never a Hub download) |
 | `clamp  :` | `armani.safety.clamp_action(recorded)` — the envelope in the send path |
 | `[policy] …` | `stats=checkpoint:<your dir> (own MEAN_STD stats, no pretrain routing)` |
 | `[policy] action unnormalize MEAN_STD:` | your dataset's mean/std (cross-check `check_dataset.py`) |
@@ -160,20 +161,27 @@ Read four lines of that output before trusting anything downstream:
   `recorded` is **refused on the base model**, and refused outright if `armani.safety`
   is unimportable (there is no fallback table for it — an embedded guess would drift
   from the operator's real calibration). Operator present, kill switch armed.
-- **`--seconds 90`** — the demos are 30 fps / ~600 waypoints and this loop executes one
-  waypoint per step at the `--hz` pace (10 Hz default): ~60 s of playback. The old 30 s
-  cap cut the pick off before the grasp. `n_obs_steps: 1` means the policy sees a single
-  frame + state with no history or velocity term, so replaying at 10 Hz instead of 30 Hz
-  preserves the trajectory — only wall-clock changes (~3× slower). Measured on this Mac:
-  **813 waypoints in 90.1 s (9.0 Hz)**, comfortably past the ~600 needed. The loop is
-  pace-bound, not inference-bound: median step cost is 9 ms and inference is 18% of wall
-  time, because the policy serves 50 waypoints per plan (`n_action_steps: 50`) and only
-  re-plans every 50th step at ~400 ms — those stalls are the whole 10 → 9 Hz shortfall.
+- **`--hz 30 --seconds 30`** — RATIFIED for the scored trials: replay near the speed the
+  demos were teleoperated at. Reachable because the loop is **pace-bound, not
+  inference-bound** (median step cost 9 ms; inference 18% of wall time). Measured
+  headless: **658 waypoints in 30.0 s = 21.9 Hz achieved**, not 30 — the ~400 ms re-plan
+  every 50th step (`n_action_steps: 50`) plus ~30 ms/step of non-inference work. 658
+  clears the ~600 a demo needs, but only by ~10% and without real-camera latency, so
+  check the achieved-Hz and `[warn]` lines on the first live trial. Running at the 10 Hz
+  default is still a valid trajectory (`n_obs_steps: 1` — no history, no velocity term,
+  so only wall-clock changes) but leaves "we ran it at a third of training speed" as a
+  permanent explanation for any failure. See `eval.md` for the full rationale and the one
+  unscored 10 Hz dry trial that precedes the set.
+- **`MAX_EPISODE_SECONDS = 90`** — the hard cap, raised from 30 so a 10 Hz fallback run
+  (~60 s of playback) still fits. It is headroom, not a target; do not run at the cap.
 - **`--policy-path`** — the checkpoint dir. Empty/unset is a hard error, never a silent
   base-model run.
 
 Then the live trials (operator + arm), per `eval.md`. Every trial row in `trials.csv`
-carries its `clamp_profile`, so a `recorded` run can never be mistaken for a `policy` one.
+carries its `clamp_profile` — so a `recorded` run can never be mistaken for a `policy`
+one — plus `model_ref` and `model_revision`, so a score can always name the weights that
+produced it. The live run's operator-confirmation prompt names the model, the envelope,
+the cap and the rate, and says that table contact is intended.
 
 ## Safety recap (unchanged from the project's law)
 

@@ -310,6 +310,60 @@ def test_banner_names_the_model_and_the_envelope(capsys):
     assert "RECORDED envelope" not in base
 
 
+def test_live_confirmation_describes_the_actual_experiment():
+    """Safety rule 1 is INFORMED consent. The prompt must name the model, say the arm is
+    meant to touch the table, flag a wider-than-policy envelope, and state the real cap —
+    a fine-tuned 90 s recorded-envelope run must never be described as untuned/erratic."""
+    tuned = run_zero_shot._live_confirmation("/models/ckpt", False, "recorded", 90.0, 30.0)
+    assert "/models/ckpt" in tuned and "FINE-TUNED" in tuned
+    assert "REACHES FOR THE TABLE" in tuned and "table contact is intended" in tuned
+    assert "WIDER than policy" in tuned
+    assert "90s" in tuned and "30 Hz" in tuned
+    assert "untuned" not in tuned and "erratic" not in tuned
+
+    base = run_zero_shot._live_confirmation(smolvla_io.MODEL_ID, True, "policy", 20.0, 10.0)
+    assert "ZERO-SHOT" in base and "untuned" in base
+    assert "WIDER than policy" not in base
+
+    # An over-cap request is confirmed at the cap that will actually be enforced.
+    assert f"{run_zero_shot.MAX_EPISODE_SECONDS:g}s" in run_zero_shot._live_confirmation(
+        "/models/ckpt", False, "policy", 999.0, 30.0
+    )
+
+
+def test_report_warns_when_the_window_closed_before_the_trajectory_finished(capsys):
+    """A truncated episode is not a policy failure. The operator must see that before
+    scoring, or the run reads as a clean 0 — the false zero the cap was raised to avoid."""
+    stats = run_zero_shot.EpisodeStats(n_steps=400, elapsed_s=30.0, clamp_profile="recorded")
+    run_zero_shot._report(stats, Path("/x"), "recorded", run_zero_shot.DEMO_WAYPOINTS)
+    short = capsys.readouterr().out
+    assert "[warn]" in short and "before scoring" in short
+    assert "13.3 Hz achieved" in short  # 400 steps / 30 s, so the real rate is visible
+
+    stats = run_zero_shot.EpisodeStats(n_steps=658, elapsed_s=30.0, clamp_profile="recorded")
+    run_zero_shot._report(stats, Path("/x"), "recorded", run_zero_shot.DEMO_WAYPOINTS)
+    assert "[warn]" not in capsys.readouterr().out  # a full trajectory fits
+
+    # The untuned base has no trajectory length to fall short of — never warn there.
+    run_zero_shot._report(run_zero_shot.EpisodeStats(n_steps=110, elapsed_s=13.1), Path("/x"), "policy", None)
+    assert "[warn]" not in capsys.readouterr().out
+
+
+def test_resolve_revision_reads_local_download_metadata(tmp_path):
+    """A local checkpoint fetched with `hf download --local-dir` keeps its source commit."""
+    sha = "85eb875eb7e58595d383102ae089c78d7e25db49"
+    meta = tmp_path / ".cache" / "huggingface" / "download"
+    meta.mkdir(parents=True)
+    (meta / "model.safetensors.metadata").write_text(f"{sha}\netag\n1786475664.278785\n")
+    assert smolvla_io.resolve_revision(str(tmp_path)) == sha
+
+
+def test_resolve_revision_is_blank_rather_than_guessed(tmp_path):
+    """Unknown must read as unknown: a fabricated sha is worse than an empty cell."""
+    assert smolvla_io.resolve_revision(str(tmp_path)) == ""  # plain dir, no metadata
+    assert smolvla_io.resolve_revision("no-such-org/no-such-model") == ""
+
+
 def test_parser_clamp_profile_default_and_choices():
     parser = run_zero_shot.build_parser()
     assert parser.parse_args([]).clamp_profile is None  # -> resolves to "policy"
@@ -517,11 +571,31 @@ def test_append_trial_row_refuses_a_stale_header(tmp_path):
         run_zero_shot.append_trial_row(csv_path, {"episode_tag": "e1", "clamp_profile": "recorded"})
 
 
-def test_trial_row_records_the_clamp_profile(tmp_path):
+def test_trial_row_records_profile_and_model_identity(tmp_path):
+    """A score is only quotable if the row says which envelope AND which weights made it."""
     csv_path = tmp_path / "trials.csv"
-    run_zero_shot.append_trial_row(csv_path, {"episode_tag": "e1", "clamp_profile": "recorded", "score": 3})
+    run_zero_shot.append_trial_row(csv_path, {
+        "episode_tag": "e1", "clamp_profile": "recorded", "score": 3,
+        "model_ref": "/models/ckpt", "model_revision": "85eb875eb7e58595d383102ae089c78d7e25db49",
+    })
     header, row = csv_path.read_text().strip().splitlines()
-    assert row.split(",")[header.split(",").index("clamp_profile")] == "recorded"
+    cols = dict(zip(header.split(","), row.split(",")))
+    assert cols["clamp_profile"] == "recorded"
+    assert cols["model_ref"] == "/models/ckpt"
+    assert cols["model_revision"] == "85eb875eb7e58595d383102ae089c78d7e25db49"
+
+
+def test_shipped_trials_csv_matches_the_header_and_names_its_model():
+    """The real results file must stay appendable and self-describing — the closed S2
+    rows carry the base model, so they can never be read as fine-tuned scores."""
+    import csv as _csv
+
+    with run_zero_shot.TRIALS_CSV.open(newline="") as handle:
+        rows = list(_csv.DictReader(handle))
+    assert tuple(rows[0]) == run_zero_shot.TRIALS_HEADER  # append_trial_row would refuse otherwise
+    for row in rows:
+        assert row["model_ref"] == smolvla_io.MODEL_ID
+        assert row["clamp_profile"] == "policy"
 
 
 def test_episode_cap_covers_a_600_waypoint_demo():

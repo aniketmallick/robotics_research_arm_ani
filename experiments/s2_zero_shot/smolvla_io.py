@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
@@ -208,6 +209,45 @@ def resolve_checkpoint(cli_path: str | None = None) -> str:
             "dir, or unset it to run the base model."
         )
     return env or MODEL_ID
+
+
+def resolve_revision(model_ref: str) -> str:
+    """Best-effort commit sha for the loaded model. ``""`` when there genuinely isn't one.
+
+    A score is only quotable if the file can say WHICH weights produced it, so the
+    trial row records a revision alongside the ref. Two sources, both offline:
+
+    * a local checkpoint dir fetched with ``hf download --local-dir`` keeps the source
+      commit in ``.cache/huggingface/download/<file>.metadata`` (line 1). We read the
+      one for ``model.safetensors`` — the weights file is what "which model" means.
+    * a Hub repo id resolves through the shared cache's ``refs/main``, the same pointer
+      ``from_pretrained`` follows when no revision is pinned.
+
+    Never raises and never guesses: an unknown revision is reported as unknown, because
+    a fabricated one is worse for the audit trail than an empty cell.
+    """
+    try:
+        download = Path(model_ref) / ".cache" / "huggingface" / "download"
+        if download.is_dir():
+            shas = set()
+            for meta in download.glob("*.metadata"):
+                head = meta.read_text().splitlines()[:1] if meta.is_file() else []
+                if head and head[0].strip():
+                    shas.add(head[0].strip())
+            # One revision for the whole snapshot is the normal case (and covers sharded
+            # weights). A dir assembled from several revisions cannot name one, so it
+            # names none rather than picking a file's sha and calling it the model's.
+            return shas.pop() if len(shas) == 1 else ""
+        if Path(model_ref).is_dir():
+            return ""  # a plain directory of weights carries no revision
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE as hub_cache
+        except Exception:
+            hub_cache = Path.home() / ".cache" / "huggingface" / "hub"
+        ref = Path(hub_cache) / f"models--{model_ref.replace('/', '--')}" / "refs" / "main"
+        return ref.read_text().strip() if ref.is_file() else ""
+    except Exception:  # pragma: no cover - identity metadata must never break a run
+        return ""
 
 
 def cameras_to_fill(image_keys: tuple[str, ...], is_base: bool) -> tuple[str, ...]:

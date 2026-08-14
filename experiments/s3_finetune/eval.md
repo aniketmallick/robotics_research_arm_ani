@@ -18,11 +18,13 @@ convention** (no arm, no camera):
 
 ```bash
 $PY -m experiments.s2_zero_shot.run_zero_shot --policy-path "$CKPT" \
-    --no-arm --synthetic-frame --seconds 90 --clamp-profile recorded
+    --no-arm --synthetic-frame --hz 30 --seconds 30 --clamp-profile recorded
 ```
 
-Four things to read before going anywhere near the arm:
+Five things to read before going anywhere near the arm:
 
+0. `model  :` / `rev    :` — your checkpoint dir and the commit it was downloaded from.
+   That pair is what lands in `trials.csv`, so a score can always name its weights.
 1. `[policy] loading <your ckpt dir> (fine-tuned)` — **not** `lerobot/smolvla_base`. If
    `$CKPT` is unset the runner **aborts** (empty `--policy-path` is an error, not a
    silent base-load), so a mistagged base run can't slip through.
@@ -44,26 +46,62 @@ Four things to read before going anywhere near the arm:
 Expect (fine-tuned): action targets in OUR degree convention (roughly the demo joint
 ranges), NOT the so100 servo-degree convention (~120°) the base emitted.
 
-**Episode length: use `--seconds 90`, not 20.** The demos were recorded at 30 fps,
-~600 waypoints each, and the runner executes one waypoint per step at the `--hz` pace
-(10 Hz default) — ~60 s of playback. A 20 s episode cuts the pick off before the grasp
-and scores a false 0. The policy has `n_obs_steps: 1` (a single frame + single state, no
-history, no velocity term), so replaying at 10 Hz instead of 30 Hz preserves the
-trajectory exactly; only wall-clock changes (~3× slower). The hard cap is 90 s.
+## Playback rate — RATIFIED: score at `--hz 30 --seconds 30`
 
-Headless measurement (2026-08-14, mps, `--seconds 90`): **813 waypoints in 90.1 s = 9.0
-Hz**, against the ~600 needed. The loop is pace-bound, not inference-bound — median step
-cost 9 ms, inference 18% of wall time — because the policy already serves 50 waypoints
-per plan (`n_action_steps: 50`) and re-plans only every 50th step, at ~400 ms. Those
-re-plan stalls account for the entire 10 → 9 Hz shortfall.
+**Run the scored trials at demo speed.** The demos were recorded at 30 fps, ~600
+waypoints each, and the runner executes one waypoint per step at the `--hz` pace. At
+30 Hz that is **20 s of playback**, so `--seconds 30` gives ~1.5 demos' worth of window:
+enough to complete, tight enough that a wandering policy ends. The hard cap stays 90 s
+as headroom — do not run at the cap.
 
-> Two consequences worth knowing before you score a trial. (1) `--hz` is **not** pinned
-> by inference cost, so a faster playback is technically available — but it changes the
-> grasp's physics (momentum, gripper timing) versus the demonstrated speed, so treat it
-> as an architect decision, not a knob to twiddle mid-protocol. (2) With a 50-waypoint
-> plan at 10 Hz, the policy looks at the world roughly **every 5 s** and drives open-loop
-> in between (~1.7 s at the demo's 30 fps). A static block on a table is fine; do not
-> reposition the object, or nudge the arm, mid-episode and expect it to correct quickly.
+Why 30 and not the 10 Hz default:
+
+- **It removes a confound you cannot rule out later.** If the policy fails at 10 Hz,
+  "we ran it at a third of training speed" stays a live explanation forever.
+- **It restores the observation cadence training assumed.** The policy serves 50
+  waypoints per plan (`n_action_steps: 50`), so it looks at the world once per chunk and
+  drives open-loop in between: **~1.67 s at 30 Hz** (what training saw) versus ~5 s at
+  10 Hz. Worth remembering for Set C, where the scene is less predictable — the block is
+  static, so it will not move your Set A/B scores.
+- **It is not a safety escalation.** 30 Hz is the exact speed the demos were teleoperated
+  at, fifty times. You already know what it looks like.
+
+This is reachable because the loop is **pace-bound, not inference-bound**: median step
+cost is 9 ms and inference is only 18% of wall time.
+
+**Measured at the ratified setting (2026-08-14, mps, headless, `--hz 30 --seconds 30`):
+658 waypoints in 30.0 s — 21.9 Hz achieved, not 30.** Two costs eat the difference: the
+~400 ms re-plan every 50th step (14 of them here, ≈5.6 s) and ~30 ms/step of
+non-inference work (frame build, per-step JSONL flush). Read that honestly:
+
+- **658 > ~600, so a full trajectory still fits** — but by only ~10%, and that headless
+  number does **not** include real-camera latency. `stream.read_bgr()` on the C920 can
+  add up to a frame period per step, so the live rate may be lower.
+- **Check the `steps` line on your FIRST live trial before scoring anything.** The report
+  now prints the achieved Hz, and a fine-tuned run that ends with fewer than ~600 steps
+  prints a `[warn]` saying the window may have closed before the trajectory finished.
+  If you see it, raise `--seconds` (40–50 is still far under the 90 s cap) and re-run —
+  do not score a truncated episode as a policy failure.
+- The speed confound is **reduced, not eliminated**: 21.9 Hz is ~0.73× training speed
+  versus ~0.33× at the 10 Hz default. Quote it as "~22 Hz achieved", not "demo speed".
+
+```bash
+# ONE unscored dry trial at the 10 Hz default first — purely to calibrate your hand on
+# ESC at the slower speed. Do not score it.
+$PY -m experiments.s2_zero_shot.run_zero_shot --policy-path "$CKPT" \
+   --live --hz 10 --seconds 30 --episode-tag s3_dryrun --clamp-profile recorded
+```
+
+Then switch to 30 Hz for every scored trial — **and do not mix rates within a set.** The
+rate is recorded per trial only via your notes, so a mixed set is not reconstructable
+afterwards.
+
+> Fallback if 30 Hz looks wrong live (jerky, or the re-plan stalls read as stutter):
+> drop back to `--hz 10 --seconds 90` and say so in the results. That is still a valid
+> trajectory — the policy has `n_obs_steps: 1` (a single frame + single state, no
+> history, no velocity term), so replaying slower preserves the waypoint sequence
+> exactly; only wall-clock changes. But it reopens the speed confound, so it is a
+> fallback, not a preference.
 
 **Clamp profile is decided from the data, before eval — measure first.** Eval clamps
 with the `policy` profile (shoulder_lift/elbow_flex/wrist_flex = ±60°) **by default**,
@@ -119,24 +157,28 @@ labeled set if you want it, don't fold it into the in-distribution number).
 ```bash
 # Set A (repeat for _1 .. _10, reposition the block in the trained region each time):
 $PY -m experiments.s2_zero_shot.run_zero_shot --policy-path "$CKPT" \
-   --live --seconds 90 --task "Pick up the red block" --episode-tag s3A_trial_1 --trial
+   --live --hz 30 --seconds 30 --clamp-profile recorded \
+   --task "Pick up the red block" --episode-tag s3A_trial_1 --trial
 # Set B: block INSIDE the trained region but between demo spots (interpolation), tag s3B_interp_1 ..
 # Set C: swap in a different object (e.g. a marker), tag s3C_object_1 ..
-
-# If check_dataset flagged the demos beyond policy ±60° (see the RATIFIED block above),
-# add --clamp-profile recorded to EVERY fine-tuned trial (operator + kill switch armed):
-#   $PY -m ...run_zero_shot --policy-path "$CKPT" --clamp-profile recorded --live --seconds 90 ...
 ```
 
+`--clamp-profile recorded` belongs on EVERY fine-tuned trial here because `check_dataset`
+flagged the demos beyond policy ±60° (see the RATIFIED block above) — operator present,
+kill switch armed. Drop it only if a future dataset stays inside ±60°.
+
 `--trial` prompts a 0–4 score after each and appends to
-`experiments/s2_zero_shot/trials.csv` — which now carries a `clamp_profile` column, so a
-`recorded` trial can never be read back as a `policy` one (the two closed S2 rows are
-backfilled `policy`, which is what they ran under). Per-step raw-vs-clamped actions land
-in `logs/episode_s3*.jsonl`, each step tagged with its `clamp_profile`. Report success
+`experiments/s2_zero_shot/trials.csv`, which is now self-describing: every row carries
+`clamp_profile` (a `recorded` trial can never be read back as a `policy` one) and
+`model_ref` + `model_revision` (which weights produced the score). The two closed S2 rows
+are backfilled `policy` / `lerobot/smolvla_base`; their revision is deliberately blank,
+because the cache can say what `main` points at today, not what ran on 2026-07-24.
+Per-step raw-vs-clamped actions land in `logs/episode_s3*.jsonl`, each step tagged with
+its `clamp_profile`, and the episode summary repeats the model identity. Report success
 **rate** per set (e.g. "A: 6/10 reached ≥3, mean 2.4").
 
-**A 90 s episode is 90 s of the arm moving.** Keep the hand on ESC for the whole run;
-it is three times the S2 episode length, and unlike S2 this policy actually reaches.
+**Keep the hand on ESC for the whole run.** Unlike S2 — which snapped to one clamped pose
+— this policy reaches, descends, and closes on the block at teleop speed.
 
 ## Safety — this policy actually reaches and grasps
 

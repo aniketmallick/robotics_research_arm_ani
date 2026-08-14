@@ -39,23 +39,35 @@ DEFAULT_TASK = "Pick up the red block"
 DEFAULT_SECONDS = 20.0
 # Hard cap; still never unattended (operator present, kill switch armed, --live gated).
 # Raised 30 -> 90 for the S3 fine-tuned eval: the demos were recorded at 30 fps, ~600
-# waypoints per episode, and this loop executes ONE waypoint per step at the --hz pace
-# (10 Hz default) — so ~60 s, which the old 30 s cap cut in half, killing the pick
-# before the grasp.
+# waypoints per episode, and this loop executes ONE waypoint per step at the --hz pace,
+# so the old 30 s cap ended the pick before the grasp at any rate below 20 Hz.
 #
-# Measured here (2026-08-14, mps, --seconds 90): 813 waypoints in 90.1 s = 9.0 Hz against
-# the 10 Hz target. The loop is PACE-bound, not inference-bound — median step cost is
-# 9 ms and inference is 18% of wall time, because the policy already serves 50 waypoints
-# per plan (n_action_steps=50) and only re-plans every 50th step, at ~400 ms. Those
-# re-plan stalls are the whole 10 -> 9 Hz shortfall. 813 > 600, so the trajectory fits.
+# 90 is HEADROOM, not the protocol. The ratified S3 trials run `--hz 30 --seconds 30`
+# (demo speed: 600 waypoints = 20 s, so 30 s is ~1.5 demos). The cap has to clear the
+# 10 Hz fallback too — ~60 s of playback — hence 90.
 #
-# Why replaying at 10 Hz instead of 30 Hz is a valid trajectory: the policy config has
+# Both rates are reachable because the loop is PACE-bound, not inference-bound. Measured
+# (2026-08-14, mps): median step cost 9 ms, inference 18% of wall time, because the
+# policy serves 50 waypoints per plan (n_action_steps=50) and only re-plans every 50th
+# step, at ~400 ms. At the 10 Hz default that gave 813 waypoints in 90.1 s (9.0 Hz) —
+# the shortfall from 10 Hz is those re-plan stalls alone.
+#
+# Why the 10 Hz fallback is still a valid trajectory: the policy config has
 # `n_obs_steps: 1` — it conditions on a single frame and a single state, with no history
 # and no velocity term. Executing the same waypoint sequence at 10 Hz instead of 30 Hz
 # therefore does not change what the policy observes at any waypoint; only wall-clock
-# differs. The trajectory is preserved, playback is ~3x slower.
+# differs. The trajectory is preserved, playback is ~3x slower. (It does stretch the
+# OPEN-LOOP window between plans from ~1.67 s to ~5 s, which is why 30 Hz — training's
+# own cadence — is the ratified default for scoring.)
 MAX_EPISODE_SECONDS = 90.0
 DEFAULT_HZ = 10.0
+
+# One demo in armani_pick_red_v1 is ~600 waypoints (50 episodes x ~600 frames at 30 fps).
+# An episode that produced fewer steps than that closed its window before the trained
+# trajectory could finish — scoring it as a policy failure is exactly the false zero the
+# cap was raised to prevent, so the report says so out loud. Fine-tuned runs only; the
+# untuned base has no trajectory length to fall short of.
+DEMO_WAYPOINTS = 600
 
 _HERE = Path(__file__).resolve().parent
 LOG_DIR = _HERE / "logs"
@@ -64,7 +76,17 @@ TRIALS_HEADER = (
     "timestamp",
     "episode_tag",
     "task",
+    # Which weights produced this score. A results file that cannot answer that is not
+    # quotable; model_revision is the source commit when one exists, blank when it
+    # genuinely does not (never a guess) — see smolvla_io.resolve_revision.
+    "model_ref",
+    "model_revision",
     "device",
+    # Playback rate is an experimental variable now (10 Hz vs the ratified 30), so the
+    # results file has to carry it: n_steps/elapsed_s gives the rate ACHIEVED, which is
+    # what the "was it run at training speed?" question actually needs.
+    "hz",
+    "elapsed_s",
     "live",
     "clamp_profile",
     "n_steps",
@@ -292,7 +314,32 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _banner(task: str, device: str, live: bool, clamp_profile: str, model_ref: str, is_base: bool) -> None:
+def _live_confirmation(model_ref: str, is_base: bool, clamp_profile: str, seconds: float, hz: float) -> str:
+    """What the operator is actually confirming (completes "About to ...").
+
+    Safety rule 1 is INFORMED consent: a prompt that describes the wrong experiment is
+    not a confirmation. All four of these change what to watch for and how fast a hand
+    has to move — which model, how wide the envelope, how long, and whether the arm is
+    supposed to touch the table.
+    """
+    cap = min(float(seconds), MAX_EPISODE_SECONDS)
+    envelope = f"{clamp_profile} clamp envelope" + (
+        " (WIDER than policy — physical−2°)" if clamp_profile == "recorded" else ""
+    )
+    if is_base:
+        return (
+            "run a LIVE ZERO-SHOT SmolVLA episode (untuned base model — expect erratic motion, "
+            f"snapping decisively to one clamped pose); up to {cap:g}s at {hz:g} Hz, {envelope}"
+        )
+    return (
+        f"run a LIVE FINE-TUNED SmolVLA episode ({model_ref}) — a trained policy that REACHES "
+        "FOR THE TABLE and closes the gripper on purpose, so table contact is intended, not a "
+        f"fault; up to {cap:g}s at {hz:g} Hz, {envelope}"
+    )
+
+
+def _banner(task: str, device: str, live: bool, clamp_profile: str, model_ref: str, is_base: bool,
+            revision: str = "") -> None:
     print("=" * 68)
     # Say which spike this run IS. A fine-tuned eval printing "zero-shot baseline" is
     # the same class of mislabelling as printing the wrong stats source.
@@ -301,6 +348,7 @@ def _banner(task: str, device: str, live: bool, clamp_profile: str, model_ref: s
     else:
         print("  SPIKE S3 — FINE-TUNED SmolVLA eval")
     print(f"  model  : {model_ref}")
+    print(f"  rev    : {revision or '(none recorded — not a Hub download)'}")
     print(f"  task   : {task!r}")
     print(f"  device : {device}")
     print(f"  clamp  : {clamp.clamp_source(clamp_profile)}  (every action clamped before send)")
@@ -358,13 +406,14 @@ def main(argv: list[str] | None = None) -> int:
     checkpoint = smolvla_io.resolve_checkpoint(args.policy_path)
     is_base = checkpoint == smolvla_io.MODEL_ID
     clamp_profile = clamp.resolve_clamp_profile(args.clamp_profile, is_base)
+    revision = smolvla_io.resolve_revision(checkpoint)
 
     from armani import config, motion, safety
 
     # DRY_RUN (env) or --no-arm both force a simulated arm AND observe-only.
     dry, live = resolve_execution(args, config.DRY_RUN)
 
-    _banner(args.task, device, live, clamp_profile, checkpoint, is_base)
+    _banner(args.task, device, live, clamp_profile, checkpoint, is_base, revision)
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -410,7 +459,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if live:
             safety.install_kill_switch()
-            if not safety.require_operator("run a LIVE zero-shot SmolVLA episode (untuned — expect erratic motion)"):
+            if not safety.require_operator(
+                _live_confirmation(checkpoint, is_base, clamp_profile, args.seconds, args.hz)
+            ):
                 print("Operator did not confirm — staying observe-only, nothing sent.")
                 live = False
 
@@ -440,8 +491,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             stats = run()
 
-        _report(stats, log_path, clamp_profile)
-        sink(_summary_record(args, device, stats))
+        # Only a fine-tuned run has a trajectory length to fall short of, and an episode
+        # the operator stopped on purpose does not need advice about raising --seconds.
+        expect = None if (is_base or safety.stop_requested()) else DEMO_WAYPOINTS
+        _report(stats, log_path, clamp_profile, expect)
+        sink(_summary_record(args, device, stats, checkpoint, revision))
 
         if args.trial:
             scored = _score_trial(stats)
@@ -450,7 +504,11 @@ def main(argv: list[str] | None = None) -> int:
                     "timestamp": stamp,
                     "episode_tag": args.episode_tag,
                     "task": args.task,
+                    "model_ref": checkpoint,
+                    "model_revision": revision,
                     "device": device,
+                    "hz": args.hz,
+                    "elapsed_s": round(stats.elapsed_s, 3),
                     "live": live,
                     "clamp_profile": stats.clamp_profile,
                     "n_steps": stats.n_steps,
@@ -484,11 +542,15 @@ def main(argv: list[str] | None = None) -> int:
     return exit_code
 
 
-def _summary_record(args: argparse.Namespace, device: str, stats: EpisodeStats) -> dict:
+def _summary_record(
+    args: argparse.Namespace, device: str, stats: EpisodeStats, model_ref: str, model_revision: str
+) -> dict:
     return {
         "event": "episode_summary",
         "episode_tag": args.episode_tag,
         "task": args.task,
+        "model_ref": model_ref,
+        "model_revision": model_revision,
         "device": device,
         "live": stats.live,
         "n_steps": stats.n_steps,
@@ -503,9 +565,17 @@ def _summary_record(args: argparse.Namespace, device: str, stats: EpisodeStats) 
     }
 
 
-def _report(stats: EpisodeStats, log_path: Path, clamp_profile: str = "policy") -> None:
+def _report(stats: EpisodeStats, log_path: Path, clamp_profile: str = "policy",
+            expect_waypoints: int | None = None) -> None:
     print("-" * 68)
-    print(f"  steps            : {stats.n_steps}  over {stats.elapsed_s:.1f}s")
+    rate = stats.n_steps / stats.elapsed_s if stats.elapsed_s > 0 else 0.0
+    print(f"  steps            : {stats.n_steps}  over {stats.elapsed_s:.1f}s ({rate:.1f} Hz achieved)")
+    # A trained trajectory that never got to run is not a policy failure. Warn-only:
+    # ESC and deliberately short runs land here too, and the operator judges which.
+    if expect_waypoints is not None and stats.n_steps < expect_waypoints:
+        print(f"  [warn] {stats.n_steps} steps < ~{expect_waypoints} waypoints in one training demo —")
+        print("         the window may have closed BEFORE the trajectory finished. Raise --seconds")
+        print("         (or --hz) and re-run before scoring this as a policy failure.")
     print(f"  clamp bit        : {stats.clamp_bit_steps}/{stats.n_steps} steps ({stats.clamp_bit_rate * 100:.0f}%)")
     if stats.per_joint_bit_counts:
         worst = ", ".join(f"{j}:{n}" for j, n in stats.per_joint_bit_counts.most_common())
