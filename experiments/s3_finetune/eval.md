@@ -1,8 +1,12 @@
 # S3 eval — score the fine-tuned policy on the arm
 
-Reuses the S2 runner unchanged except the checkpoint swap (`--policy-path`). The
-policy clamp, kill switch, episode caps, 0–4 scoring, and per-step JSONL are
-identical to S2 — so the eval is directly comparable to the zero-shot baseline (0/2).
+Reuses the S2 runner: same control loop, same clamp in the send path, same kill switch,
+same 0–4 ladder, same per-step JSONL. Four things are deliberately **not** the same as
+the S2 baseline (0/2), and each is recorded per trial so the comparison stays honest —
+the checkpoint (`--policy-path`), the clamp envelope (`--clamp-profile recorded`), the
+playback rate and window (`--hz 30 --seconds 45` vs 10 Hz / 20 s), and the ratified
+best-state scoring rule. Treat it as a comparison with stated deltas, not a like-for-like
+rerun.
 
 ## Setup (`lerobot-vla` env, arm connected)
 
@@ -18,7 +22,7 @@ convention** (no arm, no camera):
 
 ```bash
 $PY -m experiments.s2_zero_shot.run_zero_shot --policy-path "$CKPT" \
-    --no-arm --synthetic-frame --hz 30 --seconds 30 --clamp-profile recorded
+    --no-arm --synthetic-frame --hz 30 --seconds 45 --clamp-profile recorded
 ```
 
 Five things to read before going anywhere near the arm:
@@ -46,13 +50,13 @@ Five things to read before going anywhere near the arm:
 Expect (fine-tuned): action targets in OUR degree convention (roughly the demo joint
 ranges), NOT the so100 servo-degree convention (~120°) the base emitted.
 
-## Playback rate — RATIFIED: score at `--hz 30 --seconds 30`
+## Playback rate — RATIFIED: score at `--hz 30 --seconds 45`, stop each episode by hand
 
 **Run the scored trials at demo speed.** The demos were recorded at 30 fps, ~600
-waypoints each, and the runner executes one waypoint per step at the `--hz` pace. At
-30 Hz that is **20 s of playback**, so `--seconds 30` gives ~1.5 demos' worth of window:
-enough to complete, tight enough that a wandering policy ends. The hard cap stays 90 s
-as headroom — do not run at the cap.
+waypoints each, and the runner executes one waypoint per step at the `--hz` pace. The
+window is `--seconds 45`, and **you end the episode yourself once the outcome is
+decided** — see "Stop it when it's decided" below. The hard cap stays 90 s as headroom;
+do not run at the cap.
 
 Why 30 and not the 10 Hz default:
 
@@ -69,32 +73,55 @@ Why 30 and not the 10 Hz default:
 This is reachable because the loop is **pace-bound, not inference-bound**: median step
 cost is 9 ms and inference is only 18% of wall time.
 
-**Measured at the ratified setting (2026-08-14, mps, headless, `--hz 30 --seconds 30`):
-658 waypoints in 30.0 s — 21.9 Hz achieved, not 30.** Two costs eat the difference: the
-~400 ms re-plan every 50th step (14 of them here, ≈5.6 s) and ~30 ms/step of
-non-inference work (frame build, per-step JSONL flush). Read that honestly:
+**Measured (2026-08-14, mps, headless, `--hz 30`): ~22 Hz achieved, not 30.** Two costs
+eat the difference: the ~400 ms re-plan every 50th step and ~30 ms/step of non-inference
+work (frame build, per-step JSONL flush). This is accepted and **must be stated in the
+results as ~0.73× training speed** — not "demo speed".
 
-- **658 > ~600, so a full trajectory still fits** — but by only ~10%, and that headless
-  number does **not** include real-camera latency. `stream.read_bgr()` on the C920 can
-  add up to a frame period per step, so the live rate may be lower.
-- **Check the `steps` line on your FIRST live trial before scoring anything.** The report
-  now prints the achieved Hz, and a fine-tuned run that ends with fewer than ~600 steps
-  prints a `[warn]` saying the window may have closed before the trajectory finished.
-  If you see it, raise `--seconds` (40–50 is still far under the 90 s cap) and re-run —
-  do not score a truncated episode as a policy failure.
-- The speed confound is **reduced, not eliminated**: 21.9 Hz is ~0.73× training speed
-  versus ~0.33× at the 10 Hz default. Quote it as "~22 Hz achieved", not "demo speed".
+Why 0.73× is scientifically fine: the policy is position-conditioned with
+`n_obs_steps: 1`, so per-waypoint behaviour is identical at any playback rate. The only
+real difference is the open-loop window between plans — **2.3 s at 22 Hz versus 1.67 s at
+30 Hz** — which is marginal against a static block. (At the 10 Hz default it was ~5 s,
+which is why 10 Hz is the fallback and not the protocol.)
+
+**The real risk is margin, not speed, and the fix is the flag — 45 s, not 30.** At 22 Hz
+a 45 s window is ~990 waypoints against the ~600 a demo needs: **65% headroom**, still
+well under the 90 s cap, and it survives the live rate dropping as low as 15 Hz
+(15 × 45 = 675 > 600). A 30 s window was only ~11% headroom on synthetic frames, and live
+camera reads eat into that — `stream.read_bgr()` on the C920 can add up to a frame period
+per step. Do not let the truncation `[warn]` discover this on trial one; a truncated
+first trial costs a reset and adds noise for nothing.
+
+The report prints the achieved Hz every run, and a fine-tuned episode that ends under
+~600 waypoints warns that the window may have closed before the trajectory did. If you
+ever see that warn on an episode you did **not** stop yourself, raise `--seconds` and
+re-run — do not score a truncated episode as a policy failure.
+
+### Stop it when it's decided
+
+**End the episode by hand as soon as the outcome is settled.** If it grasps and lifts at
+22 s, stop there; otherwise you hand a policy that already succeeded another 23 seconds
+to wander off and drop the block. Same for a clear failure — no value in watching it
+flail to the cap.
+
+ESC (or Ctrl-C) **freezes**: the loop stops commanding, the arm holds where it is —
+still holding the block, if it has one — and you get the freeze menu (return to start /
+home / torque-off / leave). Nothing auto-drives. The scoring prompt comes after the menu.
+Operator-stopped episodes are already exempt from the truncation warn, so a deliberate
+early stop reads as a deliberate early stop, not as a truncated run.
 
 ```bash
 # ONE unscored dry trial at the 10 Hz default first — purely to calibrate your hand on
-# ESC at the slower speed. Do not score it.
+# ESC at the slower speed. Do not score it, and stop it with ESC well before the window
+# closes (that is the drill), so it never reaches the truncation warn.
 $PY -m experiments.s2_zero_shot.run_zero_shot --policy-path "$CKPT" \
    --live --hz 10 --seconds 30 --episode-tag s3_dryrun --clamp-profile recorded
 ```
 
-Then switch to 30 Hz for every scored trial — **and do not mix rates within a set.** The
-rate is recorded per trial only via your notes, so a mixed set is not reconstructable
-afterwards.
+Then switch to 30 Hz for every scored trial — **and do not mix rates within a set.**
+`trials.csv` records `hz` and `elapsed_s` per row, so a mixed set is at least detectable
+afterwards (and `n_steps / elapsed_s` gives the rate actually achieved) — but a set with
+two rates answers a muddier question than the one you set out to ask.
 
 > Fallback if 30 Hz looks wrong live (jerky, or the re-plan stalls read as stutter):
 > drop back to `--hz 10 --seconds 90` and say so in the results. That is still a valid
@@ -141,6 +168,13 @@ for the normal case.
 `3` grasped it · `4` lifted + completed. A trained policy is stochastic, so we want a
 **success RATE**, not one shot.
 
+> **RATIFIED scoring rule — score the BEST state the arm reached during the episode, not
+> the state it ended in.** Decided before the first trial and held for every scored trial
+> in all three sets. A policy that grasps and lifts at 22 s and then wanders off and drops
+> the block scored a 4; post-success wandering does not erase a success. This is also why
+> you stop the episode once the outcome is decided — the two rules work together, and
+> without the first one the second would quietly cost you successes.
+
 ## Trials — reset (object + arm to rest) between every one
 
 | set | positions | n | what it measures |
@@ -157,7 +191,7 @@ labeled set if you want it, don't fold it into the in-distribution number).
 ```bash
 # Set A (repeat for _1 .. _10, reposition the block in the trained region each time):
 $PY -m experiments.s2_zero_shot.run_zero_shot --policy-path "$CKPT" \
-   --live --hz 30 --seconds 30 --clamp-profile recorded \
+   --live --hz 30 --seconds 45 --clamp-profile recorded \
    --task "Pick up the red block" --episode-tag s3A_trial_1 --trial
 # Set B: block INSIDE the trained region but between demo spots (interpolation), tag s3B_interp_1 ..
 # Set C: swap in a different object (e.g. a marker), tag s3C_object_1 ..

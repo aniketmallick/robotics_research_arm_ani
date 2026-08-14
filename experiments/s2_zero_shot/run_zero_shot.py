@@ -69,6 +69,18 @@ DEFAULT_HZ = 10.0
 # untuned base has no trajectory length to fall short of.
 DEMO_WAYPOINTS = 600
 
+# Shown at the moment of scoring, because that is where the rule gets applied. The
+# best-state clause is RATIFIED for every scored S3 trial: a policy that grasps and lifts
+# and then wanders off still grasped and lifted, and the protocol asks the operator to
+# stop the episode once the outcome is decided — without this rule, that stop would
+# quietly cost successes.
+SCORE_LADDER = (
+    "\nScore this trial (strict) — score the BEST state reached during the episode,\n"
+    "not the state it ended in:\n"
+    "  0 no purposeful motion   1 moved toward the object (~5 cm)\n"
+    "  2 touched it   3 grasped it   4 lifted + completed"
+)
+
 _HERE = Path(__file__).resolve().parent
 LOG_DIR = _HERE / "logs"
 TRIALS_CSV = _HERE / "trials.csv"
@@ -368,11 +380,7 @@ def _score_trial(stats: EpisodeStats) -> dict | None:
     if not sys.stdin.isatty():
         print("[trial] non-interactive; skipping scoring (run with a terminal to score).")
         return None
-    print(
-        "\nScore this trial (strict):\n"
-        "  0 no purposeful motion   1 moved toward the object (~5 cm)\n"
-        "  2 touched it   3 grasped it   4 lifted + completed"
-    )
+    print(SCORE_LADDER)
     try:
         raw = input("Score [0-4]: ").strip()
         score = int(raw)

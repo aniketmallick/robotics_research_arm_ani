@@ -149,14 +149,14 @@ The S2 runner loads a fine-tuned checkpoint via `--policy-path`; clamp, kill swi
 scoring, JSONL are all unchanged. See [`eval.md`](eval.md) for the protocol — including
 the **architect-ratified `--clamp-profile recorded`** exception (fine-tuned eval only, if
 `check_dataset` flagged the demos beyond policy ±60°; refused on the base) and the
-ratified **`--hz 30 --seconds 30`** playback (demo speed: 600 waypoints at 30 fps is 20 s,
-so a 20 s episode at the 10 Hz default ends before the grasp). The hard cap is 90 s of
-headroom, not a target.
+ratified **`--hz 30 --seconds 45`** playback: ~22 Hz achieved (~0.73× training speed),
+giving ~990 waypoints against the ~600 one demo needs. You stop each episode by hand once
+the outcome is decided. The hard cap is 90 s of headroom, not a target.
 
 ```bash
 PY=~/miniforge3/envs/lerobot-vla/bin/python
 $PY -m experiments.s2_zero_shot.run_zero_shot \
   --policy-path /path/to/checkpoints/last/pretrained_model \
-  --live --hz 30 --seconds 30 --clamp-profile recorded \
+  --live --hz 30 --seconds 45 --clamp-profile recorded \
   --task "Pick up the red block" --episode-tag s3_trial_1 --trial
 ```

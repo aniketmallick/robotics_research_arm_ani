@@ -331,6 +331,18 @@ def test_live_confirmation_describes_the_actual_experiment():
     )
 
 
+def test_score_ladder_states_the_best_state_rule():
+    """RATIFIED for every scored S3 trial: score the BEST state reached, not the terminal
+    one. The rule has to be at the scoring prompt, because that is where it gets applied —
+    the protocol asks the operator to stop the episode once the outcome is decided, and
+    without this rule that stop would quietly cost successes."""
+    ladder = run_zero_shot.SCORE_LADDER
+    assert "BEST state reached during the episode" in ladder
+    assert "not the state it ended in" in ladder
+    for rung in ("0 no purposeful motion", "2 touched it", "3 grasped it", "4 lifted + completed"):
+        assert rung in ladder
+
+
 def test_report_warns_when_the_window_closed_before_the_trajectory_finished(capsys):
     """A truncated episode is not a policy failure. The operator must see that before
     scoring, or the run reads as a clean 0 — the false zero the cap was raised to avoid."""
