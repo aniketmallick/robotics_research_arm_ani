@@ -191,7 +191,9 @@ def test_build_frame_fills_only_the_fill_keys():
         image_keys=("observation.images.camera1", "observation.images.camera2", "observation.images.camera3"),
         fill_image_keys=("observation.images.camera1",),
         state_dim=6, action_dim=6, chunk_size=50, device="cpu",
-        stats_dataset="so100", routed_features=("action",),
+        # Fine-tuned: its own stats, nothing routed from a pretraining dataset.
+        stats_source="checkpoint:/some/ckpt", stats_dataset="", routed_features=(),
+        action_unnorm="action unnormalize MEAN_STD: mean=[...] std=[...]",
     )
     frame = smolvla_io.build_frame({}, np.zeros((480, 640, 3), dtype=np.uint8), "pick", spec)
     assert "observation.images.camera1" in frame
@@ -312,7 +314,9 @@ def test_make_infer_fn_forwards_checkpoint_to_load(monkeypatch):
         model_ref="/fake/ckpt",
         image_keys=("observation.images.camera1",), fill_image_keys=("observation.images.camera1",),
         state_dim=6, action_dim=6,
-        chunk_size=50, device="cpu", stats_dataset="so100", routed_features=("action",),
+        chunk_size=50, device="cpu",
+        stats_source="checkpoint:/fake/ckpt", stats_dataset="", routed_features=(),
+        action_unnorm="action unnormalize MEAN_STD: mean=[...] std=[...]",
     )
 
     def fake_load(device, dataset=smolvla_io.PRETRAIN_DATASET, checkpoint=None):

@@ -13,23 +13,57 @@ export ARMANI_FOLLOWER_PORT=/dev/tty.usbmodem<follower>   # changes per plug-in
 CKPT=/path/to/checkpoints/last/pretrained_model            # downloaded from Colab
 ```
 
-**First, headless — confirm the checkpoint loads and speaks our convention** (no arm):
+**First, headless — confirm the checkpoint loads, uses its OWN stats, and speaks our
+convention** (no arm, no camera):
 
 ```bash
-$PY -m experiments.s2_zero_shot.run_zero_shot --policy-path "$CKPT" --no-arm --seconds 10
+$PY -m experiments.s2_zero_shot.run_zero_shot --policy-path "$CKPT" \
+    --no-arm --synthetic-frame --seconds 90 --clamp-profile recorded
 ```
-The runner prints the loaded model_ref and the camera keys it fills — confirm it says
-your checkpoint dir (not `lerobot/smolvla_base`) and `cameras filled
-[observation.images.camera1]` (one key, matching the one-camera fine-tune). If `$CKPT`
-is unset the runner now **aborts** (empty `--policy-path` is an error, not a silent
-base-load), so a mistagged base run can't slip through.
+
+Four things to read before going anywhere near the arm:
+
+1. `[policy] loading <your ckpt dir> (fine-tuned)` — **not** `lerobot/smolvla_base`. If
+   `$CKPT` is unset the runner **aborts** (empty `--policy-path` is an error, not a
+   silent base-load), so a mistagged base run can't slip through.
+2. `cameras filled [observation.images.camera1]` — one key, matching the one-camera
+   fine-tune.
+3. `stats=checkpoint:<your ckpt dir> (own MEAN_STD stats, no pretrain routing)` — the
+   normalization statistics computed over YOUR dataset during training, shipped inside
+   the checkpoint. If this said `pretrain:so100`, every action would be denormalized
+   against a generic scale and the arm commanded to wrong positions with no error. The
+   next line, `action unnormalize MEAN_STD: mean=[…] std=[…]`, prints the actual numbers
+   — cross-check them against `check_dataset.py`'s per-joint ranges. A checkpoint that
+   does not carry its own stats is a hard refusal, not a warning.
+4. `clamp  : armani.safety.clamp_action(recorded)` — the ratified envelope (below).
 
 > `check_stats` always loads the **base** model (it has no `--policy-path`), so it only
 > sanity-checks the base's stats — it cannot see your fine-tuned checkpoint. The
-> fine-tuned stats are verified solely by the `run_zero_shot --policy-path` line above.
+> fine-tuned stats are verified solely by the `run_zero_shot --policy-path` lines above.
 
 Expect (fine-tuned): action targets in OUR degree convention (roughly the demo joint
 ranges), NOT the so100 servo-degree convention (~120°) the base emitted.
+
+**Episode length: use `--seconds 90`, not 20.** The demos were recorded at 30 fps,
+~600 waypoints each, and the runner executes one waypoint per step at the `--hz` pace
+(10 Hz default) — ~60 s of playback. A 20 s episode cuts the pick off before the grasp
+and scores a false 0. The policy has `n_obs_steps: 1` (a single frame + single state, no
+history, no velocity term), so replaying at 10 Hz instead of 30 Hz preserves the
+trajectory exactly; only wall-clock changes (~3× slower). The hard cap is 90 s.
+
+Headless measurement (2026-08-14, mps, `--seconds 90`): **813 waypoints in 90.1 s = 9.0
+Hz**, against the ~600 needed. The loop is pace-bound, not inference-bound — median step
+cost 9 ms, inference 18% of wall time — because the policy already serves 50 waypoints
+per plan (`n_action_steps: 50`) and re-plans only every 50th step, at ~400 ms. Those
+re-plan stalls account for the entire 10 → 9 Hz shortfall.
+
+> Two consequences worth knowing before you score a trial. (1) `--hz` is **not** pinned
+> by inference cost, so a faster playback is technically available — but it changes the
+> grasp's physics (momentum, gripper timing) versus the demonstrated speed, so treat it
+> as an architect decision, not a knob to twiddle mid-protocol. (2) With a 50-waypoint
+> plan at 10 Hz, the policy looks at the world roughly **every 5 s** and drives open-loop
+> in between (~1.7 s at the demo's 30 fps). A static block on a table is fine; do not
+> reposition the object, or nudge the arm, mid-episode and expect it to correct quickly.
 
 **Clamp profile is decided from the data, before eval — measure first.** Eval clamps
 with the `policy` profile (shoulder_lift/elbow_flex/wrist_flex = ±60°) **by default**,
@@ -85,19 +119,24 @@ labeled set if you want it, don't fold it into the in-distribution number).
 ```bash
 # Set A (repeat for _1 .. _10, reposition the block in the trained region each time):
 $PY -m experiments.s2_zero_shot.run_zero_shot --policy-path "$CKPT" \
-   --live --seconds 20 --task "Pick up the red block" --episode-tag s3A_trial_1 --trial
+   --live --seconds 90 --task "Pick up the red block" --episode-tag s3A_trial_1 --trial
 # Set B: block INSIDE the trained region but between demo spots (interpolation), tag s3B_interp_1 ..
 # Set C: swap in a different object (e.g. a marker), tag s3C_object_1 ..
 
 # If check_dataset flagged the demos beyond policy ±60° (see the RATIFIED block above),
 # add --clamp-profile recorded to EVERY fine-tuned trial (operator + kill switch armed):
-#   $PY -m ...run_zero_shot --policy-path "$CKPT" --clamp-profile recorded --live ...
+#   $PY -m ...run_zero_shot --policy-path "$CKPT" --clamp-profile recorded --live --seconds 90 ...
 ```
 
 `--trial` prompts a 0–4 score after each and appends to
-`experiments/s2_zero_shot/trials.csv`; per-step raw-vs-clamped actions land in
-`logs/episode_s3*.jsonl`. Report success **rate** per set (e.g. "A: 6/10 reached ≥3,
-mean 2.4").
+`experiments/s2_zero_shot/trials.csv` — which now carries a `clamp_profile` column, so a
+`recorded` trial can never be read back as a `policy` one (the two closed S2 rows are
+backfilled `policy`, which is what they ran under). Per-step raw-vs-clamped actions land
+in `logs/episode_s3*.jsonl`, each step tagged with its `clamp_profile`. Report success
+**rate** per set (e.g. "A: 6/10 reached ≥3, mean 2.4").
+
+**A 90 s episode is 90 s of the arm moving.** Keep the hand on ESC for the whole run;
+it is three times the S2 episode length, and unlike S2 this policy actually reaches.
 
 ## Safety — this policy actually reaches and grasps
 

@@ -49,6 +49,14 @@ dataset (`so100.buffer.action`, …), so we route one dataset's stats onto the b
 printed action mean/std are absent, the outputs are raw normalized values — a bug,
 not a baseline.
 
+> Routing applies to the **base model only**. A fine-tuned checkpoint (`--policy-path`)
+> ships its own MEAN_STD stats over *our* dataset, already keyed by the bare feature;
+> the runner uses exactly those, never routes a pretraining dataset over them, and
+> **refuses to run** if they are absent. The `[policy]` banner names which is active —
+> `stats=checkpoint:<dir>` vs `stats=pretrain:so100` — and echoes the action mean/std
+> in the send path so a wrong-scale load is visible before the arm moves.
+> (`check_stats` itself always loads the base; it cannot see your checkpoint.)
+
 ## Part B/C — the trials (operator + arm)
 
 Set the camera index once (find it with `tests/smoke_03_camera.py`):
@@ -120,8 +128,52 @@ $PY -m experiments.s2_zero_shot.run_zero_shot --live --seconds 20 --task "Pick u
 ```
 
 Keep the C920 frames or a phone video for ≥3 representative trials. Every step's
-raw-vs-clamped action is in `logs/episode_*.jsonl`; the clamp-hit rate and scores
-feed `../../docs/spike_s2_results.md`.
+raw-vs-clamped action (and the `clamp_profile` it was bounded by) is in
+`logs/episode_*.jsonl`; the clamp-hit rate and scores feed
+`../../docs/spike_s2_results.md`.
+
+## Part D — evaluating a FINE-TUNED checkpoint (Spike S3)
+
+Same runner, three flags. Full protocol in
+[`../s3_finetune/eval.md`](../s3_finetune/eval.md); the mechanics are:
+
+```bash
+CKPT=~/models/smolvla_pick_red_v1
+
+# headless first — confirms the checkpoint, its OWN stats, and the clamp envelope:
+$PY -m experiments.s2_zero_shot.run_zero_shot --no-arm --synthetic-frame \
+    --seconds 90 --clamp-profile recorded --policy-path "$CKPT"
+```
+
+Read four lines of that output before trusting anything downstream:
+
+| line | must say |
+|---|---|
+| header + `model  :` | `SPIKE S3 — FINE-TUNED SmolVLA eval` and your checkpoint dir |
+| `clamp  :` | `armani.safety.clamp_action(recorded)` — the envelope in the send path |
+| `[policy] …` | `stats=checkpoint:<your dir> (own MEAN_STD stats, no pretrain routing)` |
+| `[policy] action unnormalize MEAN_STD:` | your dataset's mean/std (cross-check `check_dataset.py`) |
+
+- **`--clamp-profile recorded`** — the wider physical−2° envelope, **architect-ratified
+  for the fine-tuned eval ONLY** (the demos legitimately exceed policy ±60°, so a
+  `policy` clamp strangles the grasp and scores a false zero). Default stays `policy`;
+  `recorded` is **refused on the base model**, and refused outright if `armani.safety`
+  is unimportable (there is no fallback table for it — an embedded guess would drift
+  from the operator's real calibration). Operator present, kill switch armed.
+- **`--seconds 90`** — the demos are 30 fps / ~600 waypoints and this loop executes one
+  waypoint per step at the `--hz` pace (10 Hz default): ~60 s of playback. The old 30 s
+  cap cut the pick off before the grasp. `n_obs_steps: 1` means the policy sees a single
+  frame + state with no history or velocity term, so replaying at 10 Hz instead of 30 Hz
+  preserves the trajectory — only wall-clock changes (~3× slower). Measured on this Mac:
+  **813 waypoints in 90.1 s (9.0 Hz)**, comfortably past the ~600 needed. The loop is
+  pace-bound, not inference-bound: median step cost is 9 ms and inference is 18% of wall
+  time, because the policy serves 50 waypoints per plan (`n_action_steps: 50`) and only
+  re-plans every 50th step at ~400 ms — those stalls are the whole 10 → 9 Hz shortfall.
+- **`--policy-path`** — the checkpoint dir. Empty/unset is a hard error, never a silent
+  base-model run.
+
+Then the live trials (operator + arm), per `eval.md`. Every trial row in `trials.csv`
+carries its `clamp_profile`, so a `recorded` run can never be mistaken for a `policy` one.
 
 ## Safety recap (unchanged from the project's law)
 
@@ -131,7 +183,8 @@ feed `../../docs/spike_s2_results.md`.
 - `ARMANI_DRY_RUN=1` **or** `--no-arm` forces a simulated arm *and* observe-only, so
   a dry-run environment can never drive a real arm without the operator gate.
 - No raw action reaches the bus — `clamp` sits in the send path (unit-tested).
-- Episodes hard-capped (`--seconds`, a positive finite number ≤30). Never unattended.
+- Episodes hard-capped (`--seconds`, a positive finite number ≤90 — raised from 30 for
+  the S3 fine-tuned eval, see Part D). Never unattended.
 - Kill switch registered for `--live`; ESC/Ctrl-C stops the loop, holds, and offers
   the freeze menu (return-to-start / home / torque-off / leave). Errors return the
   arm to the entry pose.

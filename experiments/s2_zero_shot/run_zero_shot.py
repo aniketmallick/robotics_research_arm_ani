@@ -11,7 +11,7 @@ Observe-only is the default. ``--live`` is the ONLY path that sends to a motor,
 and it first: confirms the operator is present, installs the kill switch, and
 wraps the loop in ``armani.safety.SafeMotion`` so any error returns the arm to
 where the episode began. Episodes are hard-capped (``--seconds``, default 20,
-never above 30). Nothing here runs unattended.
+never above ``MAX_EPISODE_SECONDS``). Nothing here runs unattended.
 
 Run ``python -m experiments.s2_zero_shot.run_zero_shot --help`` for the flags,
 or see the README for the observe-only -> single --live -> 10-trial sequence.
@@ -37,7 +37,24 @@ from experiments.s2_zero_shot import clamp
 # --- constants -----------------------------------------------------------
 DEFAULT_TASK = "Pick up the red block"
 DEFAULT_SECONDS = 20.0
-MAX_EPISODE_SECONDS = 30.0  # hard cap; the spike says episodes ~20 s, never unattended
+# Hard cap; still never unattended (operator present, kill switch armed, --live gated).
+# Raised 30 -> 90 for the S3 fine-tuned eval: the demos were recorded at 30 fps, ~600
+# waypoints per episode, and this loop executes ONE waypoint per step at the --hz pace
+# (10 Hz default) — so ~60 s, which the old 30 s cap cut in half, killing the pick
+# before the grasp.
+#
+# Measured here (2026-08-14, mps, --seconds 90): 813 waypoints in 90.1 s = 9.0 Hz against
+# the 10 Hz target. The loop is PACE-bound, not inference-bound — median step cost is
+# 9 ms and inference is 18% of wall time, because the policy already serves 50 waypoints
+# per plan (n_action_steps=50) and only re-plans every 50th step, at ~400 ms. Those
+# re-plan stalls are the whole 10 -> 9 Hz shortfall. 813 > 600, so the trajectory fits.
+#
+# Why replaying at 10 Hz instead of 30 Hz is a valid trajectory: the policy config has
+# `n_obs_steps: 1` — it conditions on a single frame and a single state, with no history
+# and no velocity term. Executing the same waypoint sequence at 10 Hz instead of 30 Hz
+# therefore does not change what the policy observes at any waypoint; only wall-clock
+# differs. The trajectory is preserved, playback is ~3x slower.
+MAX_EPISODE_SECONDS = 90.0
 DEFAULT_HZ = 10.0
 
 _HERE = Path(__file__).resolve().parent
@@ -49,6 +66,7 @@ TRIALS_HEADER = (
     "task",
     "device",
     "live",
+    "clamp_profile",
     "n_steps",
     "clamp_bit_rate",
     "score",
@@ -78,6 +96,7 @@ class EpisodeStats:
     clamp_bit_steps: int = 0
     invalid_steps: int = 0  # NaN / unknown-joint predictions the clamp rejected
     per_joint_bit_counts: Counter = field(default_factory=Counter)
+    clamp_profile: str = ""
     clamp_source: str = ""
 
     @property
@@ -107,13 +126,15 @@ def run_episode(
     """
     seconds = float(seconds)
     # A non-finite or non-positive cap would defeat the loop guard entirely
-    # (min(nan, 30) is nan, and `elapsed >= nan` is always False -> unbounded,
+    # (min(nan, cap) is nan, and `elapsed >= nan` is always False -> unbounded,
     # unattended loop). The hard cap must be structural, so reject it outright.
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError(f"seconds must be a positive finite number, got {seconds!r}")
     seconds = min(seconds, MAX_EPISODE_SECONDS)
     period = 1.0 / hz if hz > 0 else 0.0
-    stats = EpisodeStats(live=live, clamp_source=clamp.clamp_source(clamp_profile))
+    stats = EpisodeStats(
+        live=live, clamp_profile=clamp_profile, clamp_source=clamp.clamp_source(clamp_profile)
+    )
 
     start = now()
     step = 0
@@ -135,6 +156,9 @@ def run_episode(
             "t_rel_s": round(elapsed, 4),
             "task": task,
             "live": live,
+            # Per step, not once per file: a run killed mid-episode still leaves every
+            # logged action self-describing about the envelope it was bounded by.
+            "clamp_profile": clamp_profile,
             "infer_ms": round(infer_ms, 2),
             "raw": {j: round(float(v), 4) for j, v in raw.items()},
         }
@@ -186,9 +210,23 @@ def _pace(sleep: Callable[[float], None], now: Callable[[], float], step_t: floa
 
 # --- trial CSV -----------------------------------------------------------
 def append_trial_row(csv_path: Path, row: dict) -> None:
-    """Append one scored trial, writing the header if the file is new."""
+    """Append one scored trial, writing the header if the file is new.
+
+    A file whose header does not match ``TRIALS_HEADER`` is a hard error, not an
+    append: DictWriter writes values in OUR column order under THEIR header, so a
+    stale file (one written before ``clamp_profile`` existed) would silently shift
+    every column of the results table. Migrate the file, or move it aside.
+    """
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    new_file = not csv_path.exists()
+    new_file = not csv_path.exists() or csv_path.stat().st_size == 0
+    if not new_file:
+        with csv_path.open(newline="") as handle:
+            existing = next(csv.reader(handle), None)
+        if existing is not None and tuple(existing) != TRIALS_HEADER:
+            raise ValueError(
+                f"{csv_path} header {existing} does not match {list(TRIALS_HEADER)}; refusing to "
+                "append misaligned rows. Migrate the file or move it aside."
+            )
     with csv_path.open("a", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=TRIALS_HEADER)
         if new_file:
@@ -254,9 +292,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _banner(task: str, device: str, live: bool, clamp_profile: str = "policy") -> None:
+def _banner(task: str, device: str, live: bool, clamp_profile: str, model_ref: str, is_base: bool) -> None:
     print("=" * 68)
-    print("  SPIKE S2 — zero-shot SmolVLA baseline (untuned generalist VLA)")
+    # Say which spike this run IS. A fine-tuned eval printing "zero-shot baseline" is
+    # the same class of mislabelling as printing the wrong stats source.
+    if is_base:
+        print("  SPIKE S2 — zero-shot SmolVLA baseline (untuned generalist VLA)")
+    else:
+        print("  SPIKE S3 — FINE-TUNED SmolVLA eval")
+    print(f"  model  : {model_ref}")
     print(f"  task   : {task!r}")
     print(f"  device : {device}")
     print(f"  clamp  : {clamp.clamp_source(clamp_profile)}  (every action clamped before send)")
@@ -302,20 +346,25 @@ def main(argv: list[str] | None = None) -> int:
 
     # Lazy imports: the heavy ML stack and armani.motion load only when actually
     # running, so --help and the unit tests stay fast and hardware-free.
+    # smolvla_io's module import is cheap (numpy only; torch/lerobot load inside load()).
     from experiments.s2_zero_shot import smolvla_io
-    from armani import config, motion, safety
 
-    # Resolve checkpoint + clamp profile UP FRONT so a bad config fails before we open
-    # the camera or energise the arm. resolve_clamp_profile refuses `recorded` on the
-    # base model (protects the closed S2 baseline) — that error must fire pre-hardware.
+    # Resolve checkpoint + clamp profile UP FRONT — before the armani import, before the
+    # camera, before the arm is energised. resolve_clamp_profile refuses `recorded` on the
+    # base model (protects the closed S2 baseline) AND when armani.safety is unavailable
+    # (there is no fallback table for the recorded envelope, and we never guess one). That
+    # second refusal is only reachable if it runs BEFORE `from armani import ...`, which
+    # would otherwise raise a bare ImportError in exactly the env it is meant to catch.
     checkpoint = smolvla_io.resolve_checkpoint(args.policy_path)
     is_base = checkpoint == smolvla_io.MODEL_ID
     clamp_profile = clamp.resolve_clamp_profile(args.clamp_profile, is_base)
 
+    from armani import config, motion, safety
+
     # DRY_RUN (env) or --no-arm both force a simulated arm AND observe-only.
     dry, live = resolve_execution(args, config.DRY_RUN)
 
-    _banner(args.task, device, live, clamp_profile)
+    _banner(args.task, device, live, clamp_profile, checkpoint, is_base)
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -355,6 +404,9 @@ def main(argv: list[str] | None = None) -> int:
               f"on {device} (first load is slow) ...")
         infer_fn, spec = smolvla_io.make_infer_fn(device=device, checkpoint=None if is_base else checkpoint)
         print(f"[policy] {spec.summary()}")
+        # The numbers behind the stats label, so a wrong-scale load is visible here and
+        # not only in the arm's behaviour (compare against check_dataset.py's ranges).
+        print(f"[policy] {spec.action_unnorm}")
 
         if live:
             safety.install_kill_switch()
@@ -394,21 +446,27 @@ def main(argv: list[str] | None = None) -> int:
         if args.trial:
             scored = _score_trial(stats)
             if scored is not None:
-                append_trial_row(
-                    TRIALS_CSV,
-                    {
-                        "timestamp": stamp,
-                        "episode_tag": args.episode_tag,
-                        "task": args.task,
-                        "device": device,
-                        "live": live,
-                        "n_steps": stats.n_steps,
-                        "clamp_bit_rate": round(stats.clamp_bit_rate, 3),
-                        "score": scored["score"],
-                        "note": scored["note"],
-                    },
-                )
-                print(f"[trial] recorded score {scored['score']} -> {TRIALS_CSV}")
+                row = {
+                    "timestamp": stamp,
+                    "episode_tag": args.episode_tag,
+                    "task": args.task,
+                    "device": device,
+                    "live": live,
+                    "clamp_profile": stats.clamp_profile,
+                    "n_steps": stats.n_steps,
+                    "clamp_bit_rate": round(stats.clamp_bit_rate, 3),
+                    "score": scored["score"],
+                    "note": scored["note"],
+                }
+                try:
+                    append_trial_row(TRIALS_CSV, row)
+                    print(f"[trial] recorded score {scored['score']} -> {TRIALS_CSV}")
+                except ValueError as exc:
+                    # The header guard refusing is the right call, but it must not also
+                    # destroy the score the operator just typed after a live trial. Print
+                    # the row so it can be pasted in once the file is migrated.
+                    print(f"[trial] NOT recorded — {exc}")
+                    print(f"[trial] row: {row}")
     except KeyboardInterrupt:
         print("\n[interrupted]")
         exit_code = 130
@@ -440,6 +498,7 @@ def _summary_record(args: argparse.Namespace, device: str, stats: EpisodeStats) 
         "clamp_bit_rate": round(stats.clamp_bit_rate, 4),
         "invalid_steps": stats.invalid_steps,
         "per_joint_bit_counts": dict(stats.per_joint_bit_counts),
+        "clamp_profile": stats.clamp_profile,
         "clamp_source": stats.clamp_source,
     }
 

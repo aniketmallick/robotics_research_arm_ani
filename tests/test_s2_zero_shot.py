@@ -159,7 +159,7 @@ def test_seconds_never_exceeds_hard_cap():
         task="t", live=False, hz=8.0, seconds=100.0, sink=lambda r: None,
         now=now, sleep=sleep,
     )
-    assert stats.n_steps == int(run_zero_shot.MAX_EPISODE_SECONDS * 8)  # clamped to 30 s
+    assert stats.n_steps == int(run_zero_shot.MAX_EPISODE_SECONDS * 8)  # clamped to the hard cap
 
 
 def test_stop_breaks_loop():
@@ -199,6 +199,123 @@ def test_fallback_limits_match_armani_source():
 def test_clamp_source_reports_armani_when_available():
     pytest.importorskip("armani.safety")
     assert "armani" in clamp.clamp_source()
+    assert "(policy)" in clamp.clamp_source("policy")
+    assert "(recorded)" in clamp.clamp_source("recorded")
+
+
+# --- clamp profile (S3 fine-tuned eval) ---------------------------------
+def test_clamp_profile_default_is_policy():
+    assert clamp.resolve_clamp_profile(None, is_base=True) == "policy"
+    assert clamp.resolve_clamp_profile(None, is_base=False) == "policy"
+
+
+def test_recorded_profile_refused_on_base_model():
+    """The closed S2 baseline (0/2) can never be re-measured under a wider envelope."""
+    with pytest.raises(SystemExit) as exc:
+        clamp.resolve_clamp_profile("recorded", is_base=True)
+    assert "base model" in str(exc.value)
+
+
+def test_recorded_profile_fails_closed_without_armani(monkeypatch):
+    """No fallback table exists for `recorded` — an embedded guess would drift from the
+    operator's real calibration (safety rule 2). Simulates the stripped env by flipping
+    the import flag; both the resolver and the clamp itself must refuse, not approximate.
+
+    Non-zero exit: SystemExit carrying a message exits 1, never 0.
+    """
+    monkeypatch.setattr(clamp, "_HAVE_ARMANI", False)
+    with pytest.raises(SystemExit) as exc:
+        clamp.resolve_clamp_profile("recorded", is_base=False)
+    assert "armani.safety" in str(exc.value)
+    assert exc.value.code != 0
+
+    with pytest.raises(SystemExit):
+        clamp.policy_clamp(dict(REST), profile="recorded")
+    # ...while the policy profile still works from the embedded fallback.
+    assert clamp.policy_clamp(dict(REST), profile="policy").bit is False
+
+
+def test_main_exits_nonzero_when_recorded_requested_without_armani(monkeypatch):
+    """End-to-end: the refusal fires before any camera/arm/model is touched."""
+    monkeypatch.setattr(clamp, "_HAVE_ARMANI", False)
+    with pytest.raises(SystemExit) as exc:
+        run_zero_shot.main(
+            ["--clamp-profile", "recorded", "--policy-path", "/nonexistent/ckpt",
+             "--no-arm", "--synthetic-frame"]
+        )
+    assert exc.value.code != 0
+    assert "armani.safety" in str(exc.value)
+
+
+def test_recorded_profile_allows_what_policy_clips():
+    """The whole point of FIX 1: teleop-derived targets outside +-60 survive `recorded`.
+
+    -100 deg shoulder_lift is inside the training data (min -111.2) and inside the
+    recorded envelope (physical -111 + 2 deg margin), but the policy profile clips it
+    to -60 and the arm never reaches the table.
+    """
+    config = pytest.importorskip("armani.config")
+    lo, _hi = config.LIMIT_PROFILES["recorded"]["shoulder_lift"]
+    action = dict(REST, shoulder_lift=-100.0)
+
+    assert clamp.policy_clamp(action, profile="policy").clamped["shoulder_lift"] == -60.0
+    recorded = clamp.policy_clamp(action, profile="recorded")
+    assert recorded.clamped["shoulder_lift"] == -100.0
+    assert recorded.bit is False
+    # ...and it is still an envelope, not "unclamped": past it, recorded bites too.
+    beyond = clamp.policy_clamp(dict(REST, shoulder_lift=-999.0), profile="recorded")
+    assert beyond.clamped["shoulder_lift"] == lo
+    assert beyond.bit is True
+
+
+def test_clamp_profile_recorded_in_records_and_stats():
+    """The profile is part of the audit trail: every step record and the summary."""
+    records: list[dict] = []
+    now, sleep = fake_clock()
+    pytest.importorskip("armani.safety")
+    stats = run_zero_shot.run_episode(
+        arm=FakeArm(), read_frame=frame_fn, infer_fn=const_infer(REST),
+        task="t", live=False, hz=10.0, seconds=999.0, sink=records.append,
+        clamp_profile="recorded", now=now, sleep=sleep, stop=stop_after(2),
+    )
+    assert stats.clamp_profile == "recorded"
+    assert "recorded" in stats.clamp_source
+    assert all(r["clamp_profile"] == "recorded" for r in records)
+
+
+def test_step_records_default_to_policy_profile():
+    records: list[dict] = []
+    now, sleep = fake_clock()
+    stats = run_zero_shot.run_episode(
+        arm=FakeArm(), read_frame=frame_fn, infer_fn=const_infer(REST),
+        task="t", live=False, hz=10.0, seconds=999.0, sink=records.append,
+        now=now, sleep=sleep, stop=stop_after(1),
+    )
+    assert stats.clamp_profile == "policy"
+    assert records[0]["clamp_profile"] == "policy"
+
+
+def test_banner_names_the_model_and_the_envelope(capsys):
+    """A fine-tuned eval must not print itself as the zero-shot baseline, and the
+    envelope in the send path has to be on screen before anything moves."""
+    run_zero_shot._banner("t", "mps", False, "recorded", "/models/ckpt", is_base=False)
+    tuned = capsys.readouterr().out
+    assert "SPIKE S3 — FINE-TUNED" in tuned and "/models/ckpt" in tuned
+    assert "zero-shot" not in tuned
+    assert "(recorded)" in tuned
+
+    run_zero_shot._banner("t", "mps", False, "policy", smolvla_io.MODEL_ID, is_base=True)
+    base = capsys.readouterr().out
+    assert "SPIKE S2 — zero-shot" in base and "(policy)" in base
+    assert "RECORDED envelope" not in base
+
+
+def test_parser_clamp_profile_default_and_choices():
+    parser = run_zero_shot.build_parser()
+    assert parser.parse_args([]).clamp_profile is None  # -> resolves to "policy"
+    assert parser.parse_args(["--clamp-profile", "recorded"]).clamp_profile == "recorded"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--clamp-profile", "physical"])
 
 
 # --- smolvla_io pure logic (no model) -----------------------------------
@@ -209,7 +326,8 @@ def _spec(action_dim=6, state_dim=6, fill_image_keys=None):
         image_keys=cams,
         fill_image_keys=cams if fill_image_keys is None else fill_image_keys,
         state_dim=state_dim, action_dim=action_dim, chunk_size=50, device="cpu",
-        stats_dataset="so100", routed_features=("observation.state", "action"),
+        stats_source="pretrain:so100", stats_dataset="so100",
+        routed_features=("observation.state", "action"), action_unnorm="action unnormalize MEAN_STD: ...",
     )
 
 
@@ -274,6 +392,102 @@ def test_route_dataset_stats_missing_dataset_routes_nothing():
     assert "action" not in step._tensor_stats  # nothing aliased
 
 
+# --- which stats reach the motors (S3 fine-tuned checkpoint) -------------
+class _StatsStep:
+    """Minimal stand-in for a lerobot normalizer step with the given tensor stats."""
+
+    def __init__(self, tensor_stats: dict):
+        self.features = {"action": object(), "observation.state": object()}
+        self._tensor_stats = dict(tensor_stats)
+        self.stats = {}
+
+
+def _mean_std(mean, std):
+    return {"mean": mean, "std": std}
+
+
+CKPT = "/models/smolvla_pick_red_v1"
+
+
+def test_missing_stats_reports_unusable_features():
+    step = _StatsStep({"action": _mean_std(1, 2), "observation.state": {"mean": 3}})
+    pipe = _FakePipe(step)
+    assert smolvla_io.missing_stats(pipe, ("action",)) == ()
+    assert smolvla_io.missing_stats(pipe, ("observation.state",)) == ("observation.state",)  # no std
+    assert smolvla_io.missing_stats(pipe, ("nope",)) == ("nope",)
+    # A pipeline with no stats step at all can normalize nothing.
+    assert smolvla_io.missing_stats(_FakePipe(None), ("action",)) == ("action",)
+
+
+def test_resolve_stats_base_routes_the_pretraining_dataset():
+    """S2 baseline behaviour, unchanged: the base's per-embodiment stats get aliased."""
+    pre = _FakePipe(_StatsStep({"so100.buffer.observation.state": _mean_std(3, 4)}))
+    post = _FakePipe(_StatsStep({"so100.buffer.action": _mean_std(1, 2)}))
+
+    source, dataset, routed = smolvla_io.resolve_stats(pre, post, smolvla_io.MODEL_ID, "so100")
+
+    assert source == "pretrain:so100"
+    assert dataset == "so100"
+    assert set(routed) == {"observation.state", "action"}
+
+
+def test_resolve_stats_finetuned_uses_its_own_and_never_routes():
+    """FIX 3: a fine-tuned checkpoint's own MEAN_STD stats, never generic so100 ones.
+
+    The fake carries BOTH the checkpoint's bare keys and leftover so100-prefixed keys.
+    Routing would be a no-op here anyway (bare keys win), but resolve_stats must not
+    even attempt it — and must report the checkpoint, not the dataset, as the source.
+    """
+    own = _mean_std(14.125, 27.06)  # armani_pick_red_v1's real shoulder_pan mean/std
+    pre = _FakePipe(_StatsStep({"observation.state": own, "so100.buffer.observation.state": _mean_std(0, 1)}))
+    post = _FakePipe(_StatsStep({"action": own, "so100.buffer.action": _mean_std(0, 1)}))
+
+    source, dataset, routed = smolvla_io.resolve_stats(pre, post, CKPT, "so100")
+
+    assert source == f"checkpoint:{CKPT}"
+    assert (dataset, routed) == ("", ())
+    assert post.steps[0]._tensor_stats["action"] is own  # untouched by any aliasing
+
+
+def test_resolve_stats_finetuned_without_own_stats_refuses_instead_of_routing():
+    """The load-bearing one: no bare stats -> REFUSE. Never silently substitute so100.
+
+    Denormalizing against the wrong scale commands the arm to wrong positions with no
+    error at all, so this has to fail closed before the policy is ever stepped.
+    """
+    pre = _FakePipe(_StatsStep({"so100.buffer.observation.state": _mean_std(3, 4)}))
+    post = _FakePipe(_StatsStep({"so100.buffer.action": _mean_std(1, 2)}))
+
+    with pytest.raises(SystemExit) as exc:
+        smolvla_io.resolve_stats(pre, post, CKPT, "so100")
+
+    message = str(exc.value)
+    assert CKPT in message and "REFUSING" in message
+    assert "preprocessor:observation.state" in message and "postprocessor:action" in message
+    assert "action" not in post.steps[0]._tensor_stats  # nothing was routed in
+
+
+def test_action_stats_line_names_the_numbers_and_flags_absence():
+    line = smolvla_io.action_stats_line(_FakePipe(_StatsStep({"action": _mean_std([14.125], [27.06])})))
+    assert "MEAN_STD" in line and "14.12" in line and "27.06" in line
+    assert "ABSENT" in smolvla_io.action_stats_line(_FakePipe(_StatsStep({})))
+
+
+def test_spec_summary_names_the_stats_source():
+    base = _spec()
+    assert "stats=pretrain:so100 (routed [" in base.summary()
+
+    tuned = smolvla_io.PolicySpec(
+        model_ref=CKPT, image_keys=("observation.images.camera1",),
+        fill_image_keys=("observation.images.camera1",), state_dim=6, action_dim=6,
+        chunk_size=50, device="mps", stats_source=f"checkpoint:{CKPT}", stats_dataset="",
+        routed_features=(), action_unnorm="action unnormalize MEAN_STD: mean=[...] std=[...]",
+    )
+    summary = tuned.summary()
+    assert f"stats=checkpoint:{CKPT}" in summary and "no pretrain routing" in summary
+    assert "so100" not in summary
+
+
 def test_synthetic_frame_varies_by_step():
     import numpy as np
 
@@ -292,6 +506,36 @@ def test_append_trial_row_writes_header_once(tmp_path):
     assert lines[0].split(",")[0] == "timestamp"  # header
     assert len(lines) == 3  # header + 2 rows
     assert "e1" in lines[1] and "e2" in lines[2]
+
+
+def test_append_trial_row_refuses_a_stale_header(tmp_path):
+    """A pre-clamp_profile file must not be appended to: DictWriter would write our
+    column order under their header and shift every column of the results table."""
+    csv_path = tmp_path / "trials.csv"
+    csv_path.write_text("timestamp,episode_tag,task,device,live,n_steps,clamp_bit_rate,score,note\n")
+    with pytest.raises(ValueError):
+        run_zero_shot.append_trial_row(csv_path, {"episode_tag": "e1", "clamp_profile": "recorded"})
+
+
+def test_trial_row_records_the_clamp_profile(tmp_path):
+    csv_path = tmp_path / "trials.csv"
+    run_zero_shot.append_trial_row(csv_path, {"episode_tag": "e1", "clamp_profile": "recorded", "score": 3})
+    header, row = csv_path.read_text().strip().splitlines()
+    assert row.split(",")[header.split(",").index("clamp_profile")] == "recorded"
+
+
+def test_episode_cap_covers_a_600_waypoint_demo():
+    """The demos are 30 fps, ~600 waypoints; this loop runs one waypoint per loop STEP at
+    the --hz pace (10 Hz default), so ~60 s. The cap has to clear that or the pick is cut
+    off before the grasp. Defaults themselves stay at the S2 values.
+
+    Measured, not assumed: 813 waypoints in 90.1 s. The loop is pace-bound, not
+    inference-bound — median step cost ~9 ms, with a ~400 ms re-plan every 50th step
+    (n_action_steps: 50) — so the shortfall from 10 Hz is the re-plan stalls alone.
+    """
+    assert run_zero_shot.MAX_EPISODE_SECONDS >= 600 / run_zero_shot.DEFAULT_HZ
+    assert run_zero_shot.DEFAULT_HZ == 10.0
+    assert run_zero_shot.DEFAULT_SECONDS == 20.0
 
 
 def test_parser_defaults_observe_only():

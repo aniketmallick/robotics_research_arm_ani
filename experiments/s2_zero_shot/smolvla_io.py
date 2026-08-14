@@ -14,11 +14,20 @@ measurement, not a working policy:
   checkpoint was trained on a single-camera dataset (only the first key present
   each frame), so we feed exactly that one key — feeding 3 copies to a
   1-camera-trained policy would be a train/serve mismatch.
-* **Positional joint map.** The base model outputs a 6-vector in ITS training
-  arm's convention. We map it positionally onto our JOINTS order and unnormalize
-  with the checkpoint's OWN action stats — so the numbers land in the base
-  model's space, not our SO-101 calibration. That mismatch is the baseline the
-  spike measures; the policy clamp downstream is what keeps it safe.
+* **Positional joint map, and WHOSE numbers come out.** The action vector is mapped
+  positionally onto our JOINTS order. Which normalization stats unnormalize it
+  depends on the checkpoint, and that distinction is the whole measurement:
+
+  - **base (zero-shot, S2).** smolvla_base is multi-embodiment and keys its stats
+    per PRETRAINING dataset, so we route one of them (``so100``) onto the bare
+    feature keys. The numbers then land in that base arm's space, not our SO-101
+    calibration. That mismatch is the baseline the spike measures; the policy
+    clamp downstream is what keeps it safe.
+  - **fine-tuned (S3).** Training computed MEAN_STD over OUR dataset and shipped
+    those statistics inside the checkpoint, already keyed by the bare feature. We
+    use exactly those and never route a pretraining dataset's stats over them —
+    and if they are absent we refuse to run, because unnormalizing against the
+    wrong scale commands the arm to wrong positions invisibly, with no error.
 
 Image format follows lerobot's own observation_processor: HWC uint8 BGR frame ->
 RGB -> CHW float32 in [0, 1] (the pipeline's IDENTITY visual norm passes it
@@ -75,16 +84,25 @@ class PolicySpec:
     action_dim: int
     chunk_size: int
     device: str
-    stats_dataset: str  # which pretraining dataset's stats we routed to (OOD choice)
+    stats_source: str  # WHERE the active normalization stats came from (see load)
+    stats_dataset: str  # pretraining dataset routed onto the bare keys; "" if none was
     routed_features: tuple[str, ...]  # features whose stats were successfully routed
+    action_unnorm: str  # echo of the ACTION unnormalize mean/std actually in the send path
 
     def summary(self) -> str:
         fill, declared = list(self.fill_image_keys), list(self.image_keys)
         cams = f"cameras filled {fill}" + (f" of declared {declared}" if declared != fill else "")
+        # Name the stats SOURCE, never just a dataset label: a fine-tuned checkpoint
+        # routes nothing, and printing the routing dataset there read as "so100 stats
+        # are in use" when they were not.
+        stats = (
+            f"stats={self.stats_source} (routed {list(self.routed_features)})"
+            if self.stats_dataset
+            else f"stats={self.stats_source} (own MEAN_STD stats, no pretrain routing)"
+        )
         return (
             f"{self.model_ref} on {self.device}: state_dim={self.state_dim}, "
-            f"action_dim={self.action_dim}, chunk={self.chunk_size}, "
-            f"{cams}, stats={self.stats_dataset} (routed {list(self.routed_features)})"
+            f"action_dim={self.action_dim}, chunk={self.chunk_size}, {cams}, {stats}"
         )
 
 
@@ -120,6 +138,50 @@ def route_dataset_stats(pipeline: Any, dataset: str) -> list[str]:
                 numpy_stats[feature] = numpy_stats[source]
             routed.append(feature)
     return routed
+
+
+def _has_mean_std(entry: Any) -> bool:
+    """True if a stats entry can actually drive a MEAN_STD (un)normalization.
+
+    Mapping-tested rather than duck-typed on ``in``: a bare tensor answers ``in``
+    by raising, and None by TypeError, so ask for the mapping protocol first.
+    """
+    return callable(getattr(entry, "keys", None)) and "mean" in entry and "std" in entry
+
+
+def missing_stats(pipeline: Any, features: tuple[str, ...]) -> tuple[str, ...]:
+    """Which of ``features`` the pipeline CANNOT normalize (no usable mean/std).
+
+    Reads ``_tensor_stats`` — the dict the transform actually indexes at inference —
+    so this reports what the run will really do, not what the config declares.
+    """
+    step = stats_step(pipeline)
+    if step is None:
+        return features
+    tensor_stats = getattr(step, "_tensor_stats", None) or {}
+    return tuple(f for f in features if not _has_mean_std(tensor_stats.get(f)))
+
+
+def _to_floats(value: Any) -> list[float]:
+    array = value.detach().to("cpu").numpy() if hasattr(value, "detach") else np.asarray(value)
+    return np.round(np.asarray(array, dtype=float).ravel(), 2).tolist()
+
+
+def action_stats_line(postprocessor: Any) -> str:
+    """One-line echo of the ACTION unnormalize mean/std actually in the send path.
+
+    The stats SOURCE label says where the numbers came from; this says what they
+    ARE, so the operator can eyeball them against ``check_dataset.py``'s per-joint
+    ranges instead of trusting a label. Wrong stats are otherwise silent: they
+    produce plausible-looking joint targets on the wrong scale.
+    """
+    entry = None
+    step = stats_step(postprocessor)
+    if step is not None:
+        entry = (getattr(step, "_tensor_stats", None) or {}).get("action")
+    if not _has_mean_std(entry):
+        return "action unnormalize: ABSENT (outputs would be raw normalized values)"
+    return f"action unnormalize MEAN_STD: mean={_to_floats(entry['mean'])} std={_to_floats(entry['std'])}"
 
 
 def resolve_checkpoint(cli_path: str | None = None) -> str:
@@ -160,6 +222,44 @@ def cameras_to_fill(image_keys: tuple[str, ...], is_base: bool) -> tuple[str, ..
     return image_keys if is_base else image_keys[:1]
 
 
+def resolve_stats(
+    preprocessor: Any, postprocessor: Any, model_ref: str, dataset: str
+) -> tuple[str, str, tuple[str, ...]]:
+    """Put the ACTIVE normalization stats in place; return (source, routed_dataset, routed).
+
+    The one decision that sets the SCALE of every number sent to the motors, split on
+    which model is loaded (see :func:`load`). Takes built pipelines rather than a
+    checkpoint path, so it is unit-testable with fakes and no ML stack.
+
+    Raises ``SystemExit`` if a fine-tuned checkpoint does not carry its own stats.
+    """
+    if model_ref == MODEL_ID:
+        # Base: multi-embodiment stats keyed "<dataset>.buffer.<feature>" — alias one
+        # pretraining dataset's onto the bare keys or normalization silently no-ops.
+        routed = tuple(route_dataset_stats(preprocessor, dataset) + route_dataset_stats(postprocessor, dataset))
+        if missing_stats(postprocessor, ("action",)):
+            log.error(
+                "action unnormalize stats absent for the base model (dataset=%r) — outputs would "
+                "be raw normalized values. Check ARMANI_SMOLVLA_STATS_DATASET against the "
+                "checkpoint's '<dataset>.buffer.action' keys.", dataset,
+            )
+        return f"pretrain:{dataset}", dataset, routed
+
+    # Fine-tuned: its own stats, or nothing. No routing is attempted at all, so generic
+    # pretrain stats can never be spliced in behind a missing key.
+    missing = [f"preprocessor:{f}" for f in missing_stats(preprocessor, ("observation.state",))]
+    missing += [f"postprocessor:{f}" for f in missing_stats(postprocessor, ("action",))]
+    if missing:
+        raise SystemExit(
+            f"fine-tuned checkpoint {model_ref!r} is missing its own normalization stats "
+            f"({', '.join(missing)}). REFUSING to run: the state would be fed raw and the "
+            "actions unnormalized against the wrong scale, commanding the arm to wrong "
+            "positions with no error. Check the checkpoint dir has its processor JSONs + "
+            "*_normalizer_processor.safetensors, or omit --policy-path for the base model."
+        )
+    return f"checkpoint:{model_ref}", "", ()
+
+
 def load(
     device: str, dataset: str = PRETRAIN_DATASET, checkpoint: str | None = None
 ) -> tuple[Any, Any, Any, PolicySpec]:
@@ -171,10 +271,20 @@ def load(
 
     The checkpoint bakes ``device="cuda"`` into its processor config; we override
     the device_processor step at build time exactly as lerobot's own eval script
-    does, otherwise the build asserts CUDA and crashes on this Mac. We then route
-    ``dataset``'s per-embodiment stats onto the bare feature keys so normalization
-    actually runs (see PRETRAIN_DATASET) — a clean no-op for a fine-tuned checkpoint,
-    whose stats are already keyed by the bare feature.
+    does, otherwise the build asserts CUDA and crashes on this Mac.
+
+    NORMALIZATION STATS split on which model this is, because they decide what number
+    the motors are asked for:
+
+    * base -> route ``dataset``'s per-embodiment stats onto the bare feature keys, or
+      normalization silently no-ops (see PRETRAIN_DATASET). S2 baseline behaviour.
+    * fine-tuned -> use the checkpoint's OWN stats (already keyed by the bare feature;
+      MEAN_STD computed over our training dataset). We do not even attempt pretrain
+      routing here — today it is a no-op because the bare keys are present, but a
+      checkpoint that carried BOTH a ``<dataset>.buffer.*`` key and no bare key would
+      otherwise get generic pretrain stats spliced into a fine-tuned run. Absent stats
+      are a hard refusal, not a warning: unnormalizing against the wrong scale drives
+      the arm to the wrong positions with nothing on screen to say so.
     """
     import torch
     from lerobot.policies.factory import make_pre_post_processors
@@ -193,18 +303,7 @@ def load(
         preprocessor_overrides={"device_processor": {"device": device}},
     )
 
-    routed = route_dataset_stats(preprocessor, dataset) + route_dataset_stats(postprocessor, dataset)
-    # Base model: stats are keyed per pretraining dataset, so routing is required. A
-    # fine-tuned checkpoint keys them by the bare "action" already, so routing is a clean
-    # no-op. Warn only when the ACTION unnormalize stats are STILL absent after both — a
-    # genuinely broken load, not the fine-tuned case (which would otherwise false-alarm).
-    post_step = stats_step(postprocessor)
-    if not (post_step is not None and "action" in (getattr(post_step, "_tensor_stats", None) or {})):
-        log.error(
-            "action unnormalize stats absent (checkpoint=%r, dataset=%r) — outputs would be raw "
-            "normalized values. Base model: check ARMANI_SMOLVLA_STATS_DATASET; fine-tuned "
-            "checkpoint: its training stats should be keyed 'action'.", model_ref, dataset,
-        )
+    stats_source, stats_dataset, routed = resolve_stats(preprocessor, postprocessor, model_ref, dataset)
 
     image_keys = tuple(cfg.image_features)
     fill_image_keys = cameras_to_fill(image_keys, is_base=model_ref == MODEL_ID)
@@ -218,8 +317,10 @@ def load(
         action_dim=action_dim,
         chunk_size=int(cfg.chunk_size),
         device=device,
-        stats_dataset=dataset,
-        routed_features=tuple(routed),
+        stats_source=stats_source,
+        stats_dataset=stats_dataset,
+        routed_features=routed,
+        action_unnorm=action_stats_line(postprocessor),
     )
     if state_dim != len(JOINT_ORDER):
         log.warning(

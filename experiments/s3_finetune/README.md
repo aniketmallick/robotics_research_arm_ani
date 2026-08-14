@@ -146,13 +146,15 @@ device in `docs/spike_s3_results.md`.**
 ## 4. Eval on the arm (`lerobot-vla`, the S2 runner)
 
 The S2 runner loads a fine-tuned checkpoint via `--policy-path`; clamp, kill switch,
-caps, scoring, JSONL are all unchanged. See [`eval.md`](eval.md) for the protocol —
-including the **architect-ratified `--clamp-profile recorded`** exception (fine-tuned
-eval only, if `check_dataset` flagged the demos beyond policy ±60°; refused on the base).
+scoring, JSONL are all unchanged. See [`eval.md`](eval.md) for the protocol — including
+the **architect-ratified `--clamp-profile recorded`** exception (fine-tuned eval only, if
+`check_dataset` flagged the demos beyond policy ±60°; refused on the base) and why the
+episode cap is **90 s** for a fine-tuned run (30 fps demos, ~600 waypoints, one waypoint
+per inference at ~10 Hz — a 20 s episode ends before the grasp).
 
 ```bash
 PY=~/miniforge3/envs/lerobot-vla/bin/python
 $PY -m experiments.s2_zero_shot.run_zero_shot \
   --policy-path /path/to/checkpoints/last/pretrained_model \
-  --live --seconds 20 --task "Pick up the red block" --episode-tag s3_trial_1 --trial
+  --live --seconds 90 --task "Pick up the red block" --episode-tag s3_trial_1 --trial
 ```
