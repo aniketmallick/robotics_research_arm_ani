@@ -19,3 +19,7 @@ tests/out/
 # Dataset backups: tens of MB of binary recordings. Irreplaceable, but they do
 # not belong in git — copy this directory to a USB stick or cloud drive.
 armani/data/dataset_backup/
+
+# personal / unreviewed docs — never publish
+Residency form answers.md
+docs/robotics_startup_reality_2026.md

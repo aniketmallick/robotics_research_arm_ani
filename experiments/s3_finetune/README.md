@@ -104,7 +104,7 @@ lerobot-train \
   --policy.freeze_vision_encoder=false \
   --policy.train_expert_only=false \
   --policy.device=cuda \
-  --wandb.enable=false        # flip to true ONLY after `wandb login` (else it stalls the run)
+  --wandb.enable=true        # flip to true ONLY after `wandb login` (else it stalls the run)
 ```
 
 | arg | why |
