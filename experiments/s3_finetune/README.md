@@ -101,7 +101,7 @@ lerobot-train \
   --steps=20000 \
   --policy.scheduler_decay_steps=20000 \
   --save_freq=5000 \
-  --policy.freeze_vision_encoder=false \
+  --policy.freeze_vision_encoder=true \
   --policy.train_expert_only=false \
   --policy.device=cuda \
   --wandb.enable=true        # flip to true ONLY after `wandb login` (else it stalls the run)
@@ -114,7 +114,7 @@ lerobot-train \
 | `--steps=20000` | official default; SmolVLA converges fast on a small set — stop earlier if train loss plateaus |
 | `--policy.scheduler_decay_steps=20000` | **match `--steps`** or the LR never decays (AGENT_GUIDE §7.5) |
 | `--save_freq=5000` | checkpoint every 5k for eval + resume |
-| `--policy.freeze_vision_encoder=false` | unfreeze the vision encoder — substantially better on a specialized task |
+| `--policy.freeze_vision_encoder=true` | keep the vision encoder frozen — what the shipped S3 checkpoint trained with (corrected 2026-09-04; earlier text said false) |
 | `--output_dir=/content/drive/MyDrive/...` | **write to mounted Google Drive** so checkpoints survive a Colab disconnect |
 
 **Expected wall-clock:** A100 ≈ 3–5 h at 20k/batch 64; T4 much slower — halve steps

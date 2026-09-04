@@ -28,8 +28,23 @@ CAMERA_INDEX = int(os.getenv("ARMANI_CAMERA_INDEX", "0"))
 CAMERA_W, CAMERA_H, CAMERA_FPS = 640, 480, 30  # C920 at the S2/demo resolution
 
 NUM_EPISODES = int(os.getenv("ARMANI_S3_NUM_EPISODES", "50"))  # ~50 CLEAN demos (SOP)
-# A PICK — no place: rest -> approach -> grasp -> lift -> stop. Shorter than the 30 s
-# pick-AND-place recording; keep every demo about this long (SOP: similar lengths).
+# CORRECTED 2026-08-24 (Option E measurement, ego2so101 research channel). The two lines
+# below are WRONG about the delivered dataset and are kept, struck through, rather than deleted:
+#
+#   > "A PICK - no place: rest -> approach -> grasp -> lift -> stop. Shorter than the 30 s
+#   >  pick-AND-place recording; keep every demo about this long (SOP: similar lengths)."
+#
+# MEASURED from all 50 episodes of anikmall/armani_pick_red_v1 (data/chunk-000/file-000.parquet):
+# every episode contains grasp -> sustained closed hold -> RELEASE. 50/50, invariant to the
+# detector's only free parameter (sustain 5/10/20 frames). Gripper stays closed a median 157
+# frames (5.2 s) while shoulder_pan swings a median 59.4 deg, and the release lands at
+# shoulder_pan 62.73 deg +/- 1.44 (sd, n=50) - a consistent place spot. Confirmed visually on
+# episodes 0, 23 and 49: approach, grasp, lateral transport, place, retract.
+#
+# THE DATASET IS A PICK **AND PLACE**. The task string ("Pick up the red block") also does not
+# describe the demonstrated behaviour; it is left alone because it is baked into the trained
+# checkpoint and the frozen eval, and is logged as an R-A instance instead.
+# See Robo_Research_Data/ego2so101/deliverables/OPTION_E_MEASUREMENT.md.
 EPISODE_TIME_S = int(os.getenv("ARMANI_S3_EPISODE_TIME_S", "20"))
 RESET_TIME_S = int(os.getenv("ARMANI_S3_RESET_TIME_S", "10"))
 FPS = 30

@@ -15,7 +15,11 @@ is an improvement; the bar for "S3 worked" is a real, repeatable pick success ra
   only (x, y). Recorded with the C920 (`record_picks.py`) so the dataset has images
   SmolVLA needs. Rules: `SOP.md`. Sanity: `check_dataset.py`.
 - **Fine-tune:** `smolvla_base` via `lerobot-train` (`finetune_smolvla.ipynb`, Colab).
-  Vision encoder unfrozen. Base model `lerobot/smolvla_base`.
+  ~~Vision encoder unfrozen.~~ **CORRECTED 2026-08-24 — VISION ENCODER WAS FROZEN.** Read from the
+  delivered checkpoint's own `train_config.json` (`~/models/smolvla_pick_red_v1`, revision
+  `85eb875e…`), not from prose: `freeze_vision_encoder: true`, `train_expert_only: false`,
+  `train_state_proj: true`. `S3_VERDICT.md` and the fallback-3 addendum were right; this line and
+  the notebook's own train cell were wrong. Base model `lerobot/smolvla_base`.
 - **Eval:** the S2 runner with `--policy-path <checkpoint>`; clamp + kill switch +
   caps + 0–4 scoring unchanged, so it's directly comparable to the S2 zero. Protocol:
   `eval.md`.
@@ -36,9 +40,12 @@ is an improvement; the bar for "S3 worked" is a real, repeatable pick success ra
 
 | quantity | value |
 |---|---|
-| lerobot commit + version | **TODO** (target `58ccc015…`, 0.5.2 — must read v3.0 + save 0.5.2-loadable) |
-| device / GPU | **TODO** (Colab A100 / T4 / Mac-MPS) |
-| batch_size / steps / scheduler_decay_steps | **TODO** |
+| lerobot commit + version | `58ccc0150867a027e4b3b4ce18dd589113d6ea09`, 0.5.2 (dataset `codebase_version: v3.0`) |
+| device / GPU | `cuda` — **the specific GPU model was never recorded and is not recoverable** from the checkpoint. Logged as a gap, not guessed. |
+| batch_size / steps / scheduler_decay_steps | **64 / 20000 / 20000** (warmup 1000, lr 1e-4, seed 1000, num_workers 4) — from `train_config.json`, filled 2026-08-24 |
+| freeze_vision_encoder / train_expert_only / train_state_proj | **true / false / true** — filled 2026-08-24 from the checkpoint |
+| resume | `true`, from `/content/drive/MyDrive/s3/smolvla_pick_red/checkpoints/last/pretrained_model` — the recorded run was the final leg of a resumed run; 20 000 is the TOTAL step count |
+| policy input_features | `observation.state`, `observation.images.camera1`, **`camera2`, `camera3`** — all three image slots declared by the checkpoint; S3 supplied only `camera1` |
 | freeze_vision_encoder | **TODO** (expect false) |
 | wall-clock | **TODO** |
 | final train loss / plateau | **TODO** |
