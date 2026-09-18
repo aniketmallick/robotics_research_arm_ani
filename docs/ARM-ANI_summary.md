@@ -1,3 +1,5 @@
+> **Historical — July 2026 hackathon one-pager.** Describes the voice-interactive ARM-ANI demo (stages 1–3). The project's direction changed in August 2026 to measurement-first evaluation and certification; see the root [README](../README.md). Kept unedited.
+
 # ARM-ANI — VC one-pager (copy-paste)
 
 ## The one-liner (pick your register)

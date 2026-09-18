@@ -1,3 +1,5 @@
+> **Historical — July 2026 hackathon context for the `armani/` voice agent.** Still accurate for `armani/` and the safety rules (which every later experiment inherits). For the S2/S3 experiments and current direction, read the root [README](README.md) first.
+
 # ARM-ANI — Voice-Interactive SO-101 with Trust Gates
 
 Project context for Claude Code. **Read this file fully before doing any work. Re-read it after any context compaction.**

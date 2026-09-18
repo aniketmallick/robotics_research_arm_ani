@@ -1,3 +1,5 @@
+> **PRE-EVAL SKELETON — kept unfilled on purpose.** This file was written *before* the S3 eval (the sets, n, and ladder below were fixed here first) and is left as the pre-registration artefact. Results and verdict live in [`experiments/s2_zero_shot/S3_VERDICT.md`](../experiments/s2_zero_shot/S3_VERDICT.md). Errata (dated): **2026-08-24** — "pick only" in the Question is wrong; the dataset is pick-and-place (see README Corrections). **2026-09-04** — the training-config row reads `freeze_vision_encoder: true` from the checkpoint; the later `TODO (expect false)` row is superseded by it. **2026-09-18** — the "Dataset" TODO table is now filled by `experiments/s3_finetune/dataset_report.md`.
+
 # Spike S3 — fine-tune SmolVLA on one pick (results)
 
 **Question:** does fine-tuning `smolvla_base` on ~50 in-domain teleop demos of ONE

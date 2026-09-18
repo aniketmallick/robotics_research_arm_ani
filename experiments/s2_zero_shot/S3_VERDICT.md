@@ -1,4 +1,6 @@
 # S3 VERDICT — fine-tuned SmolVLA vs zero-shot baseline
+> **Erratum 2026-09-18 — Finding 1 ("coverage predicts capability") is downgraded to *observed, untested*.** Measured in [`docs/coverage_map.md`](../../docs/coverage_map.md): at n=18 the available proxy does not separate successes from failures, and the cited shoulder_pan asymmetry includes the place spot. Everything below is left exactly as written on 2026-08-16.
+
 **Spike S3 · closed 2026-08-16 · architect-reviewed**
 
 ## Question
